@@ -105,3 +105,36 @@ fixed in [`candlestick_master_pro.pine`](candlestick_master_pro.pine).
   material. They are not measured win rates and are not presented as such
   anywhere in the tooltips.
 - **No order execution.** Entry/SL/TP remain analytical reference levels.
+
+## 7. CE10295 — "the main body of the script is too long"
+
+Pine caps how much code the **global scope** may hold. The script had grown to
+roughly 1460 code lines in the main body; ~680 of them were moved into functions,
+which is the fix TradingView's own error message recommends. Nothing changed
+semantically — each extracted function is called unconditionally on every bar, so
+history references inside them advance exactly as before.
+
+| Moved into a function | Was | Now |
+|---|---|---|
+| The 45 pattern detections | 355 lines of `if … fire(…)` in the main body | `detectSingleCandle()`, `detectDoubleCandle()`, `detectTripleCandle()`, `detectMultiCandle()` — four calls |
+| Dashboard cells | 74 | `drawDashboard()` |
+| Legend rows | 33 | `drawLegend()` |
+| Pattern lifecycle loop | 30 | `updateLifecycle()` |
+| FVG retirement loop | 14 | `retireFvgs()` |
+| FVG interaction scan | 15 | `scanFvgs()`, returning a 4-tuple |
+| Same-bar pattern scan | 25 | `scanPattern(dir)`, returning a 4-tuple, called once per direction |
+| 18 multi-line shape definitions | 100 | one `fn…()` wrapper each |
+| BOS / CHoCH drawing | 32 | `drawBreak(dir, level, isChoch)` |
+
+Main body: **1463 → 783 code lines.** Of what remains, 225 lines are `input.*`
+calls, which have to stay in the global scope.
+
+Two details worth recording, because they constrain how this refactor can be done:
+
+- **A Pine function cannot reassign a global variable.** The BOS/CHoCH drawing
+  used `var line lastBullBreakLine` and reassigned it, so it could not simply be
+  wrapped. It now pushes into `var array<line> structLines` instead — *mutating*
+  an object is allowed where reassigning a variable is not. That also gained a
+  feature: `structKeep` controls how many recent breaks stay on the chart.
+- **Blocks that produced several globals return tuples instead**
+  (`scanFvgs`, `scanPattern`), for the same reason.
