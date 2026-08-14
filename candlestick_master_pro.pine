@@ -1,0 +1,1875 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+// CANDLESTICK MASTER PRO — 45 PATTERNS + CONFLUENCE ENGINE
+//
+// Candlestick recognition + multi-factor confluence indicator.
+// No automatic broker orders. Risk levels are analytical references only.
+//
+// HOW IT WORKS
+//   Anatomy engine     : ATR-scaled OHLC measurements (body, wicks, ratios).
+//   Structure engine   : confirmed pivots, single-use swing breaks (BOS),
+//                        directional state and CHOCH.
+//   Context engine     : EMA20/50 trend, pivot + recent + previous-day S/R,
+//                        supply/demand proxies, ADX/DMI, volume.
+//   Imbalance engine   : quality-filtered Fair Value Gaps (multi-zone boxes).
+//   Regime engine      : Bollinger width, squeeze/expansion, chop detection.
+//   Validation engine  : RSI (level + bounded pivot divergence), MACD,
+//                        smoothed Stochastic, session VWAP, volume vs SMA(20).
+//   Confluence engine  : family-weighted score, so correlated momentum checks
+//                        cannot outweigh location and structure.
+//   Lifecycle engine   : DETECTED -> CONFIRMED / FAILED / EXPIRED per pattern.
+//
+// IMPORTANT NOTES
+//   1. Pine v6 timeframe.period uses "1D" / "1W" for daily/weekly charts.
+//   2. Pattern definitions are OHLC/structure based, never candle-colour based.
+//   3. Forex volume on TradingView is tick volume, not traded volume.
+//   4. The reliability figure is qualitative reference information from the
+//      candlestick literature, NOT a guaranteed win rate.
+//   5. Detection runs on confirmed bars only, so signals do not repaint.
+//      The dashboard intentionally reflects the live, still-forming bar.
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("Candlestick Master Pro", "CandleMasterPro", overlay = true,
+     max_labels_count = 500, max_lines_count = 250, max_boxes_count = 200)
+
+// ═════════════════════════════════ INPUTS ═══════════════════════════════════
+
+grpCat = "Filters - Category"
+showBullRev = input.bool(true, "Bullish reversal patterns", group = grpCat)
+showBearRev = input.bool(true, "Bearish reversal patterns", group = grpCat)
+showCont    = input.bool(true, "Continuation / momentum patterns", group = grpCat)
+showInd     = input.bool(true, "Indecision / exhaustion patterns", group = grpCat)
+
+grpTier = "Filters - Priority Tier"
+tierMust = input.bool(true, "Must", group = grpTier)
+tierImp  = input.bool(true, "Important", group = grpTier)
+tierRare = input.bool(false, "Rare", group = grpTier)
+
+grpStr = "Filters - Structure"
+structSingle = input.bool(true, "Single candle", group = grpStr)
+structDouble = input.bool(true, "Double candle", group = grpStr)
+structTriple = input.bool(true, "Triple & multi candle", group = grpStr)
+
+grpTf = "Timeframe Gating"
+ignoreTf = input.bool(false, "Ignore timeframe filter (testing)", group = grpTf,
+     tooltip = "When OFF each pattern only appears on its ideal chart timeframes.")
+
+grpConf = "Confirmation / Validation"
+confirmedOnly = input.bool(false, "Show only confirmed patterns", group = grpConf)
+confWindow = input.int(3, "Confirmation window (bars)", group = grpConf,
+     minval = 1, maxval = 10)
+useLoc = input.bool(true, "Check: support/resistance zone", group = grpConf)
+useRSI = input.bool(true, "Check: RSI level / divergence", group = grpConf)
+useEMA = input.bool(true, "Check: 20 EMA reclaim/loss", group = grpConf)
+useVol = input.bool(true, "Check: volume spike (tick volume)", group = grpConf)
+volMult = input.float(1.2, "Volume spike multiplier", group = grpConf,
+     minval = 0.5, step = 0.1)
+useMACD = input.bool(true, "Check: MACD momentum / crossover", group = grpConf)
+useStoch = input.bool(true, "Check: Stochastic pullback / momentum", group = grpConf)
+useVWAP = input.bool(true, "Check: VWAP location (intraday only)", group = grpConf)
+useStructure = input.bool(true, "Check: market structure / BOS", group = grpConf)
+useFVG = input.bool(true, "Check: Fair Value Gap (FVG)", group = grpConf)
+useADX = input.bool(true, "Check: ADX trend strength", group = grpConf)
+rsiOS = input.int(35, "RSI oversold level", group = grpConf,
+     minval = 1, maxval = 50)
+rsiOB = input.int(65, "RSI overbought level", group = grpConf,
+     minval = 50, maxval = 99)
+
+grpOsc = "Oscillator Settings"
+macdFast = input.int(12, "MACD fast", group = grpOsc, minval = 1)
+macdSlow = input.int(26, "MACD slow", group = grpOsc, minval = 2)
+macdSignalLen = input.int(9, "MACD signal", group = grpOsc, minval = 1)
+stochLen = input.int(14, "Stochastic length", group = grpOsc, minval = 2)
+stochSmoothK = input.int(3, "Stochastic %K smoothing", group = grpOsc, minval = 1)
+stochSmoothD = input.int(3, "Stochastic %D smoothing", group = grpOsc, minval = 1)
+stochOS = input.int(20, "Stochastic oversold", group = grpOsc, minval = 1, maxval = 50)
+stochOB = input.int(80, "Stochastic overbought", group = grpOsc, minval = 50, maxval = 99)
+adxLen = input.int(14, "ADX length", group = grpOsc, minval = 2)
+adxMin = input.float(18.0, "ADX minimum trend strength", group = grpOsc,
+     minval = 5.0, step = 0.5)
+
+grpCtx = "Context Engine"
+trendLb = input.int(5, "Trend slope lookback (bars)", group = grpCtx, minval = 1)
+strictTrend = input.bool(true, "Require swing structure to agree with EMA trend",
+     group = grpCtx,
+     tooltip = "A prior downtrend also needs non-bullish swing structure, and vice versa. Cuts counter-trend false positives.")
+pivLen = input.int(5, "Pivot length", group = grpCtx, minval = 2)
+zoneMult = input.float(0.5, "S/R zone width (x ATR)", group = grpCtx,
+     minval = 0.1, step = 0.1)
+divWindow = input.int(12, "RSI divergence valid for (bars)", group = grpCtx,
+     minval = 1)
+divMaxSpan = input.int(60, "Maximum bars between divergence pivots",
+     group = grpCtx, minval = 5)
+srLookback = input.int(20, "Recent S/R lookback (bars)", group = grpCtx, minval = 5)
+maruWickPct = input.float(0.05, "Marubozu maximum wick (x range)", group = grpCtx,
+     minval = 0.0, maxval = 0.20, step = 0.01,
+     tooltip = "A textbook Marubozu has no shadows. Real feeds print small ticks, so a small tolerance per side is allowed.")
+maruWickTicks = input.int(2, "Marubozu extra wick allowance (ticks)",
+     group = grpCtx, minval = 0, maxval = 20)
+
+grpFvg = "Fair Value Gap Engine"
+showFVGZones = input.bool(true, "Show active FVG zones", group = grpFvg)
+fvgLookback = input.int(20, "FVG active lookback (bars)", group = grpFvg,
+     minval = 1, maxval = 100)
+fvgMaxZones = input.int(6, "Maximum tracked zones per side", group = grpFvg,
+     minval = 1, maxval = 20)
+fvgMinQuality = input.int(70, "Minimum FVG quality to keep", group = grpFvg,
+     minval = 50, maxval = 100)
+fvgMinGapATR = input.float(0.10, "Minimum FVG size (x ATR)", group = grpFvg,
+     minval = 0.01, step = 0.01)
+fvgMinBodyATR = input.float(0.80, "Minimum displacement body (x ATR)",
+     group = grpFvg, minval = 0.10, step = 0.05)
+fvgMinBodyPct = input.float(0.70, "Minimum displacement body/range",
+     group = grpFvg, minval = 0.50, maxval = 0.95, step = 0.05)
+fvgMinSRDistanceATR = input.float(1.00, "Minimum distance from S/R (x ATR)",
+     group = grpFvg, minval = 0.10, step = 0.10)
+fvgMinRoomATR = input.float(2.00, "Minimum clear room to opposing S/R (x ATR)",
+     group = grpFvg, minval = 0.50, step = 0.25)
+fvgMinADX = input.float(20.0, "Minimum ADX for quality FVG", group = grpFvg,
+     minval = 5.0, step = 0.5)
+fvgRequireVolume = input.bool(true, "Require above-average volume for FVG",
+     group = grpFvg)
+
+grpPro = "Professional Engine"
+showPanel = input.bool(true, "Show signal panel", group = grpPro)
+showHTF = input.bool(true, "Use higher-timeframe context", group = grpPro)
+showBB = input.bool(true, "Use Bollinger Bands", group = grpPro)
+showSR = input.bool(true, "Show support / resistance", group = grpPro)
+showSD = input.bool(true, "Show supply / demand", group = grpPro)
+showStructure = input.bool(true, "Show BOS / CHOCH", group = grpPro)
+showRisk = input.bool(true, "Show entry / SL / TP", group = grpPro)
+htfA = input.timeframe("60", "HTF 1", group = grpPro)
+htfB = input.timeframe("240", "HTF 2", group = grpPro)
+htfC = input.timeframe("1D", "HTF 3", group = grpPro)
+bbLen = input.int(20, "BB length", group = grpPro, minval = 5)
+bbMult = input.float(2.0, "BB multiplier", group = grpPro, minval = 0.5, step = 0.1)
+atrSLMult = input.float(1.2, "ATR stop multiplier", group = grpPro,
+     minval = 0.5, step = 0.1)
+slBufferATR = input.float(0.15, "Stop buffer beyond pattern (x ATR)",
+     group = grpPro, minval = 0.0, step = 0.05)
+rr1 = input.float(1.5, "TP1 R multiple", group = grpPro, minval = 0.5, step = 0.25)
+rr2 = input.float(2.5, "TP2 R multiple", group = grpPro, minval = 1.0, step = 0.25)
+strongScore = input.int(80, "Strong confluence score", group = grpPro,
+     minval = 50, maxval = 100)
+goodScore = input.int(65, "Good confluence score", group = grpPro,
+     minval = 40, maxval = 95)
+minTradeScore = input.int(65, "Minimum trade score", group = grpPro,
+     minval = 50, maxval = 95)
+avoidChop = input.bool(true, "Reject strong chop", group = grpPro)
+maxRiskDistanceATR = input.float(3.0, "Maximum pattern distance (x ATR)",
+     group = grpPro, minval = 1.0, step = 0.25)
+fireAlerts = input.bool(true, "Send alert() on trade-ready patterns",
+     group = grpPro, tooltip = "Create the alert with 'Any alert() function call'.")
+
+grpP1 = "Patterns - Single Candle (01-12)"
+p01 = input.bool(true, "01 Hammer (HAM)", group = grpP1)
+p02 = input.bool(true, "02 Hanging Man (HGM)", group = grpP1)
+p03 = input.bool(true, "03 Inverted Hammer (IH)", group = grpP1)
+p04 = input.bool(true, "04 Shooting Star (SST)", group = grpP1)
+p05 = input.bool(true, "05 Bullish Marubozu (BUM)", group = grpP1)
+p06 = input.bool(true, "06 Bearish Marubozu (BEM)", group = grpP1)
+p07 = input.bool(true, "07 Spinning Top (SPT)", group = grpP1)
+p08 = input.bool(true, "08 Standard Doji (DOJ)", group = grpP1)
+p09 = input.bool(true, "09 Long-Legged Doji (LLD)", group = grpP1)
+p10 = input.bool(true, "10 Dragonfly Doji (DFD)", group = grpP1)
+p11 = input.bool(true, "11 Gravestone Doji (GSD)", group = grpP1)
+p12 = input.bool(true, "12 Four Price Doji (FPD)", group = grpP1)
+
+grpP2 = "Patterns - Double Candle (13-25)"
+p13 = input.bool(true, "13 Bullish Engulfing (BEC)", group = grpP2)
+p14 = input.bool(true, "14 Bearish Engulfing (BRE)", group = grpP2)
+p15 = input.bool(true, "15 Bullish Harami (BUH)", group = grpP2)
+p16 = input.bool(true, "16 Bearish Harami (BEH)", group = grpP2)
+p17 = input.bool(true, "17 Harami Cross (HC)", group = grpP2)
+p18 = input.bool(true, "18 Piercing Line (PL)", group = grpP2)
+p19 = input.bool(true, "19 Dark Cloud Cover (DCC)", group = grpP2)
+p20 = input.bool(true, "20 Tweezer Bottom (TWB)", group = grpP2)
+p21 = input.bool(true, "21 Tweezer Top (TWT)", group = grpP2)
+p22 = input.bool(true, "22 Matching Low (ML)", group = grpP2)
+p23 = input.bool(true, "23 Matching High (MH)", group = grpP2)
+p25 = input.bool(true, "25 Kicking Pattern (KCK)", group = grpP2)
+
+grpP3 = "Patterns - Triple & Multi (24, 26-45)"
+p24 = input.bool(true, "24 Stick Sandwich (SSW)", group = grpP3)
+p26 = input.bool(true, "26 Morning Star (MS)", group = grpP3)
+p27 = input.bool(true, "27 Evening Star (ES)", group = grpP3)
+p28 = input.bool(true, "28 Morning Doji Star (MDS)", group = grpP3)
+p29 = input.bool(true, "29 Evening Doji Star (EDS)", group = grpP3)
+p30 = input.bool(true, "30 Three White Soldiers (TWS)", group = grpP3)
+p31 = input.bool(true, "31 Three Black Crows (TBC)", group = grpP3)
+p32 = input.bool(true, "32 Three Inside Up (TIU)", group = grpP3)
+p33 = input.bool(true, "33 Three Inside Down (TID)", group = grpP3)
+p34 = input.bool(true, "34 Three Outside Up (TOU)", group = grpP3)
+p35 = input.bool(true, "35 Three Outside Down (TOD)", group = grpP3)
+p36 = input.bool(true, "36 Rising Three Methods (RTM)", group = grpP3)
+p37 = input.bool(true, "37 Falling Three Methods (FTM)", group = grpP3)
+p38 = input.bool(true, "38 Breakaway Bullish (BWY)", group = grpP3)
+p39 = input.bool(true, "39 Ladder Bottom (LDB)", group = grpP3)
+p40 = input.bool(true, "40 Concealing Baby Swallow (CBS)", group = grpP3)
+p41 = input.bool(true, "41 Unique Three River (UTR)", group = grpP3)
+p42 = input.bool(true, "42 Tri-Star (TS)", group = grpP3)
+p43 = input.bool(true, "43 Advance Block (AB)", group = grpP3)
+p44 = input.bool(true, "44 Deliberation (DEL)", group = grpP3)
+p45 = input.bool(true, "45 Ladder Top (LDT)", group = grpP3)
+
+// ═════════════════════════════ ANATOMY ENGINE ══════════════════════════════
+
+atrV = ta.atr(14)
+body = math.abs(close - open)
+rng = high - low
+upW = high - math.max(close, open)
+loW = math.min(close, open) - low
+
+bullC = close > open
+bearC = close < open
+bodyPct = rng > 0 ? body / rng : 0.0
+bodyTop = math.max(open, close)
+bodyBot = math.min(open, close)
+
+minRange = rng >= atrV * 0.5
+longBody = body >= atrV * 0.8
+midBody = body >= atrV * 0.5
+smallBody = body <= atrV * 0.35
+
+bodyGapUp = open > math.max(open[1], close[1])
+prevBodyMid = (open[1] + close[1]) / 2.0
+
+// Opens inside the previous real body. Written out for offsets 0 and 1 instead
+// of using a variable history offset, which Pine cannot size a buffer for.
+openInside0 = open >= math.min(open[1], close[1]) and open <= math.max(open[1], close[1])
+openInside1 = open[1] >= math.min(open[2], close[2]) and open[1] <= math.max(open[2], close[2])
+
+// ═════════════════════════ SWING STRUCTURE ENGINE ══════════════════════════
+// Confirmed pivots only. Each swing may be broken exactly once, which makes
+// BOS a discrete event instead of a permanently true state. CHOCH is a break
+// that reverses the previous structural direction.
+
+pl = ta.pivotlow(low, pivLen, pivLen)
+ph = ta.pivothigh(high, pivLen, pivLen)
+
+var float swingHigh = na
+var float swingLow = na
+var bool swingHighLive = false
+var bool swingLowLive = false
+var int structDir = 0
+
+if not na(ph)
+    swingHigh := ph
+    swingHighLive := true
+if not na(pl)
+    swingLow := pl
+    swingLowLive := true
+
+bullBOSEvent = swingHighLive and not na(swingHigh) and close > swingHigh
+bearBOSEvent = swingLowLive and not na(swingLow) and close < swingLow
+
+bullCHOCH = bullBOSEvent and structDir == -1
+bearCHOCH = bearBOSEvent and structDir == 1
+float brokenSwingHigh = bullBOSEvent ? swingHigh : na
+float brokenSwingLow = bearBOSEvent ? swingLow : na
+
+if bullBOSEvent
+    swingHighLive := false
+    structDir := 1
+if bearBOSEvent
+    swingLowLive := false
+    structDir := -1
+
+// ═════════════════════════════ CONTEXT ENGINE ══════════════════════════════
+
+emaFast = ta.ema(close, 20)
+emaSlow = ta.ema(close, 50)
+
+upTrendCore = emaFast > emaSlow and emaSlow > emaSlow[trendLb]
+downTrendCore = emaFast < emaSlow and emaSlow < emaSlow[trendLb]
+upTrend = upTrendCore and (not strictTrend or structDir >= 0)
+downTrend = downTrendCore and (not strictTrend or structDir <= 0)
+
+// Pivot S/R memory
+var array<float> supLevels = array.new<float>()
+var array<float> resLevels = array.new<float>()
+
+if not na(pl)
+    array.push(supLevels, pl)
+    if array.size(supLevels) > 20
+        array.shift(supLevels)
+
+if not na(ph)
+    array.push(resLevels, ph)
+    if array.size(resLevels) > 20
+        array.shift(resLevels)
+
+nearLevel(array<float> levels, float price, float tolerance) =>
+    bool hit = false
+    if array.size(levels) > 0
+        for i = 0 to array.size(levels) - 1
+            if not hit and math.abs(price - array.get(levels, i)) <= tolerance
+                hit := true
+    hit
+
+zoneTol = atrV * zoneMult
+recentSupport = ta.lowest(low, srLookback)[1]
+recentResistance = ta.highest(high, srLookback)[1]
+
+// Previous-day levels only make sense below the daily timeframe. Pulling a
+// lower timeframe into a higher chart with lookahead would leak future data.
+useDailyLevels = timeframe.in_seconds() < timeframe.in_seconds("1D")
+dHigh = request.security(syminfo.tickerid, "1D", high[1],
+     lookahead = barmerge.lookahead_on)
+dLow = request.security(syminfo.tickerid, "1D", low[1],
+     lookahead = barmerge.lookahead_on)
+prevDayHigh = useDailyLevels ? dHigh : na
+prevDayLow = useDailyLevels ? dLow : na
+
+nearPivotSup = nearLevel(supLevels, low, zoneTol)
+nearPivotRes = nearLevel(resLevels, high, zoneTol)
+nearRecentSup = not na(recentSupport) and math.abs(low - recentSupport) <= zoneTol
+nearRecentRes = not na(recentResistance) and math.abs(high - recentResistance) <= zoneTol
+nearPrevDaySup = not na(prevDayLow) and math.abs(low - prevDayLow) <= zoneTol
+nearPrevDayRes = not na(prevDayHigh) and math.abs(high - prevDayHigh) <= zoneTol
+supTouches = (nearPivotSup ? 1 : 0) + (nearRecentSup ? 1 : 0) + (nearPrevDaySup ? 1 : 0)
+resTouches = (nearPivotRes ? 1 : 0) + (nearRecentRes ? 1 : 0) + (nearPrevDayRes ? 1 : 0)
+nearSup = supTouches > 0
+nearRes = resTouches > 0
+
+bullStructure = bullBOSEvent or structDir == 1 or (upTrend and close > emaFast)
+bearStructure = bearBOSEvent or structDir == -1 or (downTrend and close < emaFast)
+
+// ADX / DMI. Every ta.* call is evaluated unconditionally: a ta function placed
+// inside a ternary branch or an if block is only advanced on the bars where the
+// branch is taken, which silently corrupts its internal state.
+trur = ta.rma(ta.tr(true), adxLen)
+upMove = ta.change(high)
+downMove = -ta.change(low)
+plusDMRaw = upMove > downMove and upMove > 0 ? upMove : 0.0
+minusDMRaw = downMove > upMove and downMove > 0 ? downMove : 0.0
+plusDMSm = ta.rma(plusDMRaw, adxLen)
+minusDMSm = ta.rma(minusDMRaw, adxLen)
+plusDI = trur > 0 ? 100.0 * plusDMSm / trur : 0.0
+minusDI = trur > 0 ? 100.0 * minusDMSm / trur : 0.0
+diSum = plusDI + minusDI
+dx = diSum > 0 ? 100.0 * math.abs(plusDI - minusDI) / diSum : 0.0
+adxVal = ta.rma(dx, adxLen)
+adxAvailable = not na(adxVal) and bar_index >= adxLen * 2
+adxBull = adxAvailable and adxVal >= adxMin and plusDI > minusDI
+adxBear = adxAvailable and adxVal >= adxMin and minusDI > plusDI
+
+// Volume (tick volume on forex feeds)
+volSma = ta.sma(volume, 20)
+volAvailable = not na(volume) and volume > 0 and not na(volSma) and volSma > 0
+volOk = volAvailable and volume > volSma * volMult
+
+// ═══════════════════════ IMBALANCE (FVG) ENGINE ════════════════════════════
+// Three-candle imbalance. Only displacement-quality gaps with clear room are
+// kept, and a zone survives partial mitigation: it dies on a full fill or when
+// its lookback expires.
+
+type Fvg
+    box bx
+    float top
+    float bot
+    int barIdx
+    int dir
+    int quality
+
+var array<Fvg> fvgs = array.new<Fvg>()
+
+bullFvgRaw = low > high[2]
+bearFvgRaw = high < low[2]
+
+dispBullStrong = bullC and body >= atrV * fvgMinBodyATR and
+     bodyPct >= fvgMinBodyPct and close >= high - rng * 0.20
+dispBearStrong = bearC and body >= atrV * fvgMinBodyATR and
+     bodyPct >= fvgMinBodyPct and close <= low + rng * 0.20
+
+bullFvgSize = bullFvgRaw ? low - high[2] : 0.0
+bearFvgSize = bearFvgRaw ? low[2] - high : 0.0
+
+// Only known S/R references are used. A qualified imbalance needs somewhere to
+// travel instead of sitting inside a crowded level.
+farSentinel = math.max(atrV * 1000.0, 1.0)
+nearestSupDist = math.min(
+     not na(recentSupport) ? math.abs(close - recentSupport) : farSentinel,
+     not na(prevDayLow) ? math.abs(close - prevDayLow) : farSentinel)
+nearestResDist = math.min(
+     not na(recentResistance) ? math.abs(close - recentResistance) : farSentinel,
+     not na(prevDayHigh) ? math.abs(close - prevDayHigh) : farSentinel)
+nearestKnownSRDist = math.min(nearestSupDist, nearestResDist)
+
+// Directional room. Only levels that are actually ahead of price can act as a
+// wall: a resistance that price already broke is not an obstacle above it.
+distResAbove = math.min(
+     not na(recentResistance) and recentResistance > close ? recentResistance - close : farSentinel,
+     not na(prevDayHigh) and prevDayHigh > close ? prevDayHigh - close : farSentinel)
+distSupBelow = math.min(
+     not na(recentSupport) and recentSupport < close ? close - recentSupport : farSentinel,
+     not na(prevDayLow) and prevDayLow < close ? close - prevDayLow : farSentinel)
+
+fvgSRFar = nearestKnownSRDist >= atrV * fvgMinSRDistanceATR
+fvgBullRoom = distResAbove >= atrV * fvgMinRoomATR
+fvgBearRoom = distSupBelow >= atrV * fvgMinRoomATR
+
+volFvgOk = not volAvailable or volOk
+adxFvgBullOk = not adxAvailable or (adxVal >= fvgMinADX and plusDI > minusDI)
+adxFvgBearOk = not adxAvailable or (adxVal >= fvgMinADX and minusDI > plusDI)
+
+bullFvgQuality = bullFvgRaw ?
+     (dispBullStrong ? 25 : 0) +
+     (bullFvgSize >= atrV * fvgMinGapATR ? 15 : 0) +
+     (fvgSRFar ? 15 : 0) +
+     (fvgBullRoom ? 15 : 0) +
+     (bullStructure ? 15 : 0) +
+     (adxFvgBullOk ? 10 : 0) +
+     ((not fvgRequireVolume or volFvgOk) ? 5 : 0) : 0
+
+bearFvgQuality = bearFvgRaw ?
+     (dispBearStrong ? 25 : 0) +
+     (bearFvgSize >= atrV * fvgMinGapATR ? 15 : 0) +
+     (fvgSRFar ? 15 : 0) +
+     (fvgBearRoom ? 15 : 0) +
+     (bearStructure ? 15 : 0) +
+     (adxFvgBearOk ? 10 : 0) +
+     ((not fvgRequireVolume or volFvgOk) ? 5 : 0) : 0
+
+// Retire filled / expired zones first, iterating downwards so removals cannot
+// invalidate the indices still to be visited.
+if array.size(fvgs) > 0
+    for i = array.size(fvgs) - 1 to 0
+        Fvg f = array.get(fvgs, i)
+        bool filled = f.dir == 1 ? low <= f.bot : high >= f.top
+        bool expired = bar_index - f.barIdx > fvgLookback
+        if filled or expired
+            if not na(f.bx)
+                box.delete(f.bx)
+            array.remove(fvgs, i)
+        else
+            if not na(f.bx)
+                box.set_right(f.bx, bar_index + 1)
+
+registerFvg(int dir, float top, float bot, int quality) =>
+    // Drop the oldest zone on this side when the cap is reached. The index is
+    // resolved before removing anything so the loop bound stays valid.
+    int sameSide = 0
+    int oldestIdx = -1
+    if array.size(fvgs) > 0
+        for i = 0 to array.size(fvgs) - 1
+            if array.get(fvgs, i).dir == dir
+                sameSide += 1
+                if oldestIdx == -1
+                    oldestIdx := i
+    if sameSide >= fvgMaxZones and oldestIdx >= 0
+        Fvg oldest = array.get(fvgs, oldestIdx)
+        if not na(oldest.bx)
+            box.delete(oldest.bx)
+        array.remove(fvgs, oldestIdx)
+    box bx = na
+    if showFVGZones
+        bx := box.new(bar_index - 2, top, bar_index + 1, bot,
+             border_color = color.new(dir == 1 ? color.teal : color.red, 55),
+             border_width = 1, xloc = xloc.bar_index,
+             bgcolor = color.new(dir == 1 ? color.teal : color.red, 88))
+    array.push(fvgs, Fvg.new(bx, top, bot, bar_index, dir, quality))
+
+if bullFvgRaw and bullFvgQuality >= fvgMinQuality
+    registerFvg(1, low, high[2], bullFvgQuality)
+if bearFvgRaw and bearFvgQuality >= fvgMinQuality
+    registerFvg(-1, low[2], high, bearFvgQuality)
+
+bool bullFvgSupport = false
+bool bearFvgResistance = false
+int bullFvgQualityActive = 0
+int bearFvgQualityActive = 0
+if array.size(fvgs) > 0
+    for i = 0 to array.size(fvgs) - 1
+        Fvg f = array.get(fvgs, i)
+        bool touching = low <= f.top + zoneTol and high >= f.bot - zoneTol
+        if touching and f.dir == 1 and close >= f.bot - zoneTol
+            bullFvgSupport := true
+            bullFvgQualityActive := math.max(bullFvgQualityActive, f.quality)
+        if touching and f.dir == -1 and close <= f.top + zoneTol
+            bearFvgResistance := true
+            bearFvgQualityActive := math.max(bearFvgQualityActive, f.quality)
+
+// ═══════════════════════ VOLATILITY / REGIME ENGINE ════════════════════════
+
+bbBasis = ta.sma(close, bbLen)
+bbDev = ta.stdev(close, bbLen) * bbMult
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = bbBasis != 0 ? (bbUpper - bbLower) / math.abs(bbBasis) : 0.0
+bbWidthAvg = ta.sma(bbWidth, bbLen)
+bbExpanding = bbWidth > bbWidth[1]
+bbSqueeze = not na(bbWidthAvg) and bbWidth < bbWidthAvg * 0.75
+bbBull = close > bbBasis and close < bbUpper
+bbBear = close < bbBasis and close > bbLower
+bbBullReclaim = close > bbBasis and close[1] <= bbBasis[1]
+bbBearReclaim = close < bbBasis and close[1] >= bbBasis[1]
+
+atrPct = close != 0 ? atrV / math.abs(close) * 100.0 : 0.0
+trendStrength = adxAvailable and adxVal >= adxMin
+emaBullStack = emaFast > emaSlow and close > emaFast
+emaBearStack = emaFast < emaSlow and close < emaFast
+inRange = not na(recentSupport) and not na(recentResistance) and
+     recentResistance > recentSupport and close > recentSupport and close < recentResistance
+strongChop = not trendStrength and not bbExpanding and inRange
+regime = strongChop ? "CHOP" :
+     trendStrength and emaBullStack ? "BULL TREND" :
+     trendStrength and emaBearStack ? "BEAR TREND" :
+     bbExpanding and close > bbBasis ? "BULL EXPANSION" :
+     bbExpanding and close < bbBasis ? "BEAR EXPANSION" :
+     inRange ? "RANGE" : "TRANSITION"
+
+// ═════════════════════════ HIGHER TIMEFRAME CONTEXT ════════════════════════
+// The [1] offset combined with lookahead_on returns the last *closed* HTF
+// value, which keeps historical and realtime behaviour identical.
+
+htf1Valid = timeframe.in_seconds() < timeframe.in_seconds(htfA)
+htf2Valid = timeframe.in_seconds() < timeframe.in_seconds(htfB)
+htf3Valid = timeframe.in_seconds() < timeframe.in_seconds(htfC)
+
+[htf1Close, htf1Ema20, htf1Ema50] = request.security(syminfo.tickerid, htfA,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]],
+     lookahead = barmerge.lookahead_on)
+[htf2Close, htf2Ema20, htf2Ema50] = request.security(syminfo.tickerid, htfB,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]],
+     lookahead = barmerge.lookahead_on)
+[htf3Close, htf3Ema20, htf3Ema50] = request.security(syminfo.tickerid, htfC,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]],
+     lookahead = barmerge.lookahead_on)
+
+htf1Bull = htf1Valid and htf1Close > htf1Ema20 and htf1Ema20 > htf1Ema50
+htf1Bear = htf1Valid and htf1Close < htf1Ema20 and htf1Ema20 < htf1Ema50
+htf2Bull = htf2Valid and htf2Close > htf2Ema20 and htf2Ema20 > htf2Ema50
+htf2Bear = htf2Valid and htf2Close < htf2Ema20 and htf2Ema20 < htf2Ema50
+htf3Bull = htf3Valid and htf3Close > htf3Ema20 and htf3Ema20 > htf3Ema50
+htf3Bear = htf3Valid and htf3Close < htf3Ema20 and htf3Ema20 < htf3Ema50
+htfActive = (htf1Valid ? 1 : 0) + (htf2Valid ? 1 : 0) + (htf3Valid ? 1 : 0)
+htfBullCount = (htf1Bull ? 1 : 0) + (htf2Bull ? 1 : 0) + (htf3Bull ? 1 : 0)
+htfBearCount = (htf1Bear ? 1 : 0) + (htf2Bear ? 1 : 0) + (htf3Bear ? 1 : 0)
+// Fewer HTFs exist on high chart timeframes, so the alignment requirement
+// scales with how many are actually usable instead of hardcoding 2 of 3.
+htfNeeded = htfActive >= 2 ? 2 : 1
+htfBullAlign = htfActive > 0 and htfBullCount >= htfNeeded
+htfBearAlign = htfActive > 0 and htfBearCount >= htfNeeded
+htfBias = htfActive == 0 ? "N/A" :
+     htfBullCount > htfBearCount ? "BULLISH" :
+     htfBearCount > htfBullCount ? "BEARISH" : "MIXED"
+
+// Supply / demand proxy zones anchored on confirmed S/R interaction.
+sdTol = atrV * math.max(zoneMult, 0.25)
+demandZone = nearSup
+supplyZone = nearRes
+demandLow = demandZone ? low - sdTol * 0.25 : na
+demandHigh = demandZone ? low + sdTol : na
+supplyLow = supplyZone ? high - sdTol : na
+supplyHigh = supplyZone ? high + sdTol * 0.25 : na
+
+// ═════════════════════════════ VALIDATION ENGINE ════════════════════════════
+
+rsiVal = ta.rsi(close, 14)
+[macdLine, macdSignalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignalLen)
+stochK = ta.sma(ta.stoch(close, high, low, stochLen), stochSmoothK)
+stochD = ta.sma(stochK, stochSmoothD)
+
+// Session VWAP computed manually: ta.vwap raises a runtime error on symbols
+// with no volume, and it is only meaningful on intraday charts.
+newSession = nz(ta.change(time("1D")), 0) != 0
+var float cumPV = 0.0
+var float cumVol = 0.0
+if newSession or barstate.isfirst
+    cumPV := 0.0
+    cumVol := 0.0
+cumPV += hlc3 * nz(volume)
+cumVol += nz(volume)
+vwapVal = cumVol > 0 ? cumPV / cumVol : na
+vwapAvailable = timeframe.isintraday and not na(vwapVal)
+vwapBull = vwapAvailable and close > vwapVal
+vwapBear = vwapAvailable and close < vwapVal
+
+macdBull = macdLine > macdSignalLine and macdHist > macdHist[1]
+macdBear = macdLine < macdSignalLine and macdHist < macdHist[1]
+macdBullCross = ta.crossover(macdLine, macdSignalLine)
+macdBearCross = ta.crossunder(macdLine, macdSignalLine)
+macdBullConfirm = macdBull or macdBullCross
+macdBearConfirm = macdBear or macdBearCross
+
+// Stochastic uses the configured levels instead of hardcoded 20/80/50, and
+// requires %K on the correct side of %D for the momentum reading.
+stochRising = stochK > stochK[1]
+stochFalling = stochK < stochK[1]
+stochBull = (stochK < stochOS and stochRising) or (stochK > 50 and stochK > stochD and stochRising)
+stochBear = (stochK > stochOB and stochFalling) or (stochK < 50 and stochK < stochD and stochFalling)
+// Each ta.crossover gets its own variable so it is never a nested operand that
+// could be skipped: a cross function must advance on every bar to stay correct.
+stochCrossUpOS = ta.crossover(stochK, float(stochOS))
+stochCrossUpD = ta.crossover(stochK, stochD)
+stochCrossDnOB = ta.crossunder(stochK, float(stochOB))
+stochCrossDnD = ta.crossunder(stochK, stochD)
+stochBullCross = stochCrossUpOS or stochCrossUpD
+stochBearCross = stochCrossDnOB or stochCrossDnD
+stochBullConfirm = stochBull or stochBullCross
+stochBearConfirm = stochBear or stochBearCross
+
+rsiRising = rsiVal > rsiVal[1]
+rsiFalling = rsiVal < rsiVal[1]
+
+// RSI pivot divergence, bounded in time so two unrelated pivots far apart
+// cannot manufacture a phantom divergence.
+var float lastPL = na
+var float lastPLr = na
+var int lastPLbar = na
+var float lastPH = na
+var float lastPHr = na
+var int lastPHbar = na
+var int bullDivBar = na
+var int bearDivBar = na
+
+if not na(pl)
+    float pivotRsi = rsiVal[pivLen]
+    int pivotBar = bar_index - pivLen
+    bool divOk = not na(lastPL) and pl < lastPL and pivotRsi > lastPLr and pivotBar - lastPLbar <= divMaxSpan
+    if divOk
+        bullDivBar := bar_index
+    lastPL := pl
+    lastPLr := pivotRsi
+    lastPLbar := pivotBar
+
+if not na(ph)
+    float pivotRsi = rsiVal[pivLen]
+    int pivotBar = bar_index - pivLen
+    bool divOk = not na(lastPH) and ph > lastPH and pivotRsi < lastPHr and pivotBar - lastPHbar <= divMaxSpan
+    if divOk
+        bearDivBar := bar_index
+    lastPH := ph
+    lastPHr := pivotRsi
+    lastPHbar := pivotBar
+
+bullDivActive = not na(bullDivBar) and bar_index - bullDivBar <= divWindow
+bearDivActive = not na(bearDivBar) and bar_index - bearDivBar <= divWindow
+
+rsiBullOk = bullDivActive or rsiVal < rsiOS or (rsiVal > 50 and rsiRising)
+rsiBearOk = bearDivActive or rsiVal > rsiOB or (rsiVal < 50 and rsiFalling)
+
+// ═══════════════════════════ CONFLUENCE ENGINE ══════════════════════════════
+// Family weighting. A family contributes its full weight only when every
+// enabled check inside it passes, so five correlated momentum indicators can
+// never outweigh location and structure. Disabled or unavailable checks are
+// removed from the denominator instead of counting as failures.
+
+W_PATTERN = 22.0
+W_TREND   = 16.0
+W_STRUCT  = 14.0
+W_LOC     = 18.0
+W_MOM     = 16.0
+W_VOL     = 8.0
+W_REGIME  = 6.0
+
+colBull = color.rgb(8, 153, 129)
+colBear = color.rgb(242, 54, 69)
+colNeut = color.rgb(120, 123, 134)
+SEP = "─────────────"
+
+qualityText(int relPct) =>
+    relPct >= 74 ? "★ High (" + str.tostring(relPct) + "%)" :
+     relPct >= 67 ? "★ Good (" + str.tostring(relPct) + "%)" :
+     relPct >= 60 ? "★ Fair (" + str.tostring(relPct) + "%)" :
+     "★ Low (" + str.tostring(relPct) + "%)"
+
+famPoints(int passed, int total, float weight) =>
+    total > 0 ? weight * passed / total : 0.0
+
+// Room to the first opposing level. A setup pointing straight into a wall is
+// downgraded even when every oscillator agrees.
+roomForTp(int dir, float riskUnit) =>
+    float opposing = dir == 1 ? distResAbove : distSupBelow
+    opposing >= riskUnit * rr1
+
+// Weighted confluence score for a direction, 0-100.
+confluenceScore(int dir, int relPct, float riskUnit) =>
+    bool bull = dir == 1
+    bool locOk = bull ? nearSup : nearRes
+    bool locStrong = bull ? supTouches >= 2 : resTouches >= 2
+    bool roomOk = roomForTp(dir, riskUnit)
+    bool rsiOk = bull ? rsiBullOk : rsiBearOk
+    bool macdOk = bull ? macdBullConfirm : macdBearConfirm
+    bool stochOk = bull ? stochBullConfirm : stochBearConfirm
+    bool vwapOk = bull ? vwapBull : vwapBear
+    bool emaOk = bull ? close > emaFast : close < emaFast
+    bool fvgOk = bull ? bullFvgSupport : bearFvgResistance
+    bool adxOk = bull ? adxBull : adxBear
+    bool bbOk = bull ? (bbBull or bbBullReclaim) : (bbBear or bbBearReclaim)
+    bool htfOk = bull ? htfBullAlign : htfBearAlign
+    bool structOk = bull ? bullStructure : bearStructure
+    bool sDirOk = bull ? structDir >= 0 : structDir <= 0
+    bool bosOk = bull ? bullBOSEvent : bearBOSEvent
+
+    float earned = 0.0
+    float possible = 0.0
+
+    // Pattern family: base validity plus the literature reliability grade.
+    float relScale = math.min(1.0, math.max(0.0, (relPct - 50.0) / 30.0))
+    earned += 10.0 + 12.0 * relScale
+    possible += W_PATTERN
+
+    // Trend family: HTF bias, 20 EMA side, ADX direction.
+    int trendPass = 0
+    int trendTotal = 0
+    if showHTF and htfActive > 0
+        trendTotal += 1
+        trendPass += htfOk ? 1 : 0
+    if useEMA
+        trendTotal += 1
+        trendPass += emaOk ? 1 : 0
+    if useADX and adxAvailable
+        trendTotal += 1
+        trendPass += adxOk ? 1 : 0
+    earned += famPoints(trendPass, trendTotal, W_TREND)
+    possible += trendTotal > 0 ? W_TREND : 0.0
+
+    // Structure family: directional alignment plus a fresh break of structure.
+    int structPass = 0
+    int structTotal = 0
+    if useStructure
+        structTotal += 2
+        structPass += structOk ? 1 : 0
+        structPass += sDirOk or bosOk ? 1 : 0
+    earned += famPoints(structPass, structTotal, W_STRUCT)
+    possible += structTotal > 0 ? W_STRUCT : 0.0
+
+    // Location family: S/R quality, imbalance, band position, room to target.
+    int locPass = 0
+    int locTotal = 0
+    if useLoc
+        locTotal += 3
+        locPass += locOk ? 1 : 0
+        locPass += locStrong ? 1 : 0
+        locPass += roomOk ? 1 : 0
+    if useFVG
+        locTotal += 1
+        locPass += fvgOk ? 1 : 0
+    if showBB
+        locTotal += 1
+        locPass += bbOk ? 1 : 0
+    earned += famPoints(locPass, locTotal, W_LOC)
+    possible += locTotal > 0 ? W_LOC : 0.0
+
+    // Momentum family: correlated oscillators share one capped budget.
+    int momPass = 0
+    int momTotal = 0
+    if useRSI
+        momTotal += 1
+        momPass += rsiOk ? 1 : 0
+    if useMACD
+        momTotal += 1
+        momPass += macdOk ? 1 : 0
+    if useStoch
+        momTotal += 1
+        momPass += stochOk ? 1 : 0
+    if useVWAP and vwapAvailable
+        momTotal += 1
+        momPass += vwapOk ? 1 : 0
+    earned += famPoints(momPass, momTotal, W_MOM)
+    possible += momTotal > 0 ? W_MOM : 0.0
+
+    // Volume family.
+    int volPass = 0
+    int volTotal = 0
+    if useVol and volAvailable
+        volTotal += 1
+        volPass += volOk ? 1 : 0
+    earned += famPoints(volPass, volTotal, W_VOL)
+    possible += volTotal > 0 ? W_VOL : 0.0
+
+    // Regime family: tradability rather than direction.
+    int regPass = 0
+    regPass += strongChop ? 0 : 1
+    regPass += bbExpanding or trendStrength ? 1 : 0
+    earned += famPoints(regPass, 2, W_REGIME)
+    possible += W_REGIME
+
+    int(math.round(100.0 * earned / math.max(possible, 1.0)))
+
+// Human-readable checklist for the same direction, mirroring the score.
+confluenceText(int dir, float riskUnit) =>
+    bool bull = dir == 1
+    bool locOk = bull ? nearSup : nearRes
+    bool roomOk = roomForTp(dir, riskUnit)
+    bool rsiOk = bull ? rsiBullOk : rsiBearOk
+    bool macdOk = bull ? macdBullConfirm : macdBearConfirm
+    bool stochOk = bull ? stochBullConfirm : stochBearConfirm
+    bool vwapOk = bull ? vwapBull : vwapBear
+    bool emaOk = bull ? close > emaFast : close < emaFast
+    bool fvgOk = bull ? bullFvgSupport : bearFvgResistance
+    bool adxOk = bull ? adxBull : adxBear
+    bool bbOk = bull ? (bbBull or bbBullReclaim) : (bbBear or bbBearReclaim)
+    bool htfOk = bull ? htfBullAlign : htfBearAlign
+    bool structOk = bull ? bullStructure : bearStructure
+
+    string locTxt = bull ?
+         (locOk ? "Location: Support confluence ✓ (" + str.tostring(supTouches) + "/3)" :
+         "Location: No key support nearby ✗") :
+         (locOk ? "Location: Resistance confluence ✓ (" + str.tostring(resTouches) + "/3)" :
+         "Location: No key resistance nearby ✗")
+    string roomTxt = roomOk ? "Target room: Clear to TP1 ✓" :
+         "Target room: Opposing level inside TP1 ✗"
+    string rsiTxt = bull ?
+         (bullDivActive ? "RSI: Bullish divergence ✓" :
+         rsiVal < rsiOS ? "RSI: Oversold ✓" :
+         rsiOk ? "RSI: Bullish momentum ✓" : "RSI: Not confirmed ✗") :
+         (bearDivActive ? "RSI: Bearish divergence ✓" :
+         rsiVal > rsiOB ? "RSI: Overbought ✓" :
+         rsiOk ? "RSI: Bearish momentum ✓" : "RSI: Not confirmed ✗")
+    string macdTxt = bull ?
+         (macdOk ? (macdBullCross ? "MACD: Bullish crossover ✓" : "MACD: Bullish momentum ✓") :
+         "MACD: Not confirmed ✗") :
+         (macdOk ? (macdBearCross ? "MACD: Bearish crossover ✓" : "MACD: Bearish momentum ✓") :
+         "MACD: Not confirmed ✗")
+    string stochTxt = (stochOk ? "Stochastic: Confirmed ✓ (" : "Stochastic: Not confirmed ✗ (") +
+         str.tostring(stochK, "#.#") + ")"
+    string vwapTxt = not vwapAvailable ? "VWAP: n/a (non-intraday or no volume)" :
+         bull ? (vwapOk ? "VWAP: Price above VWAP ✓" : "VWAP: Price below VWAP ✗") :
+         (vwapOk ? "VWAP: Price below VWAP ✓" : "VWAP: Price above VWAP ✗")
+    string emaTxt = bull ? (emaOk ? "EMA: Above 20 EMA ✓" : "EMA: Below 20 EMA ✗") :
+         (emaOk ? "EMA: Below 20 EMA ✓" : "EMA: Above 20 EMA ✗")
+    string volTxt = not volAvailable ? "Volume: n/a on this feed" :
+         volOk ? "Volume: Above average ✓ (" + syminfo.volumetype + ")" :
+         "Volume: Below average ✗ (" + syminfo.volumetype + ")"
+    string structureTxt = bull ?
+         (bullBOSEvent ? "Market structure: Bullish BOS ✓" :
+         structOk ? "Market structure: Bullish alignment ✓" :
+         "Market structure: No bullish break ✗") :
+         (bearBOSEvent ? "Market structure: Bearish BOS ✓" :
+         structOk ? "Market structure: Bearish alignment ✓" :
+         "Market structure: No bearish break ✗")
+    string fvgTxt = bull ?
+         (fvgOk ? "FVG: Qualified bullish FVG ✓ (" + str.tostring(bullFvgQualityActive) + "/100)" :
+         "FVG: No qualified bullish FVG nearby ✗") :
+         (fvgOk ? "FVG: Qualified bearish FVG ✓ (" + str.tostring(bearFvgQualityActive) + "/100)" :
+         "FVG: No qualified bearish FVG nearby ✗")
+    string adxTxt = not adxAvailable ? "ADX: n/a (warming up)" :
+         adxOk ? "ADX: Directional strength ✓ (" + str.tostring(adxVal, "#.#") + ")" :
+         "ADX: Strength not confirmed ✗ (" + str.tostring(adxVal, "#.#") + ")"
+    string bbTxt = bbOk ? "Bollinger: directional location ✓" :
+         bbSqueeze ? "Bollinger: squeeze ✗" : "Bollinger: neutral ✗"
+    string htfTxt = htfActive == 0 ? "HTF: n/a on this chart timeframe" :
+         htfOk ? "HTF: " + htfBias + " alignment ✓ (" +
+         str.tostring(bull ? htfBullCount : htfBearCount) + "/" +
+         str.tostring(htfActive) + ")" :
+         "HTF: " + htfBias + " / not aligned ✗"
+
+    (useStructure ? structureTxt + "\n" : "") +
+     (useLoc ? locTxt + "\n" + roomTxt + "\n" : "") +
+     (useRSI ? rsiTxt + "\n" : "") +
+     (useMACD ? macdTxt + "\n" : "") +
+     (useStoch ? stochTxt + "\n" : "") +
+     (useVWAP ? vwapTxt + "\n" : "") +
+     (useEMA ? emaTxt + "\n" : "") +
+     (useVol ? volTxt + "\n" : "") +
+     (useFVG ? fvgTxt + "\n" : "") +
+     (useADX ? adxTxt + "\n" : "") +
+     (showBB ? bbTxt + "\n" : "") +
+     (showHTF ? htfTxt + "\n" : "") +
+     "Regime: " + regime + " | ATR: " + str.tostring(atrPct, "#.###") + "%"
+
+// Live two-sided read for the dashboard. Cheap arithmetic, no ta.* calls, so
+// it is safe and consistent to evaluate on every bar.
+liveRisk = math.max(atrV * atrSLMult, syminfo.mintick)
+liveBullScore = confluenceScore(1, 70, liveRisk)
+liveBearScore = confluenceScore(-1, 70, liveRisk)
+
+// ═══════════════════════════ PATTERN INSTANCE SYSTEM ═══════════════════════
+
+type PatternInst
+    label lb
+    int barIdx
+    float patHigh
+    float patLow
+    int dir
+    int state
+    string abbr
+    string pname
+    string bodyTxt
+    int confidence
+    color colMain
+
+patternStatus(PatternInst inst) =>
+    inst.state == 0 ? "DETECTED - AWAITING CONFIRMATION" :
+     inst.state == 1 ? "CONFIRMED ✓" :
+     inst.state == 2 ? "FAILED ✗ (invalidation level hit)" :
+     inst.state == 3 ? "NEUTRAL - INFORMATIONAL" :
+     "EXPIRED - no confirmation in window"
+
+drawPattern(PatternInst inst) =>
+    bool isBear = inst.dir == -1
+    inst.lb := label.new(
+         inst.barIdx,
+         isBear ? inst.patHigh : inst.patLow,
+         inst.abbr,
+         xloc = xloc.bar_index,
+         yloc = yloc.price,
+         color = inst.colMain,
+         style = isBear ? label.style_label_down : label.style_label_up,
+         textcolor = color.white,
+         size = size.small,
+         tooltip = inst.abbr + "\n" + inst.pname + "\nStatus: " +
+             patternStatus(inst) + "\n" + inst.bodyTxt)
+
+var array<PatternInst> insts = array.new<PatternInst>()
+
+fire(bool patOn, int structN, string tier, string cat, int dir,
+     string tfList, string abbr, string pname, int relPct, string trendTxt,
+     string desc, string sltp, string tfHuman, float pHigh, float pLow) =>
+
+    bool catOn = cat == "BR" ? showBullRev :
+         cat == "SR" ? showBearRev :
+         cat == "CT" ? showCont : showInd
+
+    bool tierOn = tier == "M" ? tierMust :
+         tier == "I" ? tierImp : tierRare
+
+    bool structOn = structN == 1 ? structSingle :
+         structN == 2 ? structDouble : structTriple
+
+    bool tfOn = ignoreTf or tfList == "ALL" or
+         str.contains("," + tfList + ",", "," + timeframe.period + ",")
+
+    if patOn and catOn and tierOn and structOn and tfOn
+        // Risk geometry comes first: the confluence engine needs the risk unit
+        // to judge whether TP1 has room before the first opposing level.
+        int scoreDir = dir == 0 ? 1 : dir
+        float rawRisk = dir == 1 ? close - (pLow - atrV * slBufferATR) :
+             dir == -1 ? (pHigh + atrV * slBufferATR) - close : 0.0
+        float riskUnit = dir == 0 ? 0.0 : math.max(rawRisk, atrV * atrSLMult)
+
+        int confidence = dir == 0 ? 0 :
+             confluenceScore(scoreDir, relPct, riskUnit)
+        string checks = dir == 0 ?
+             "Direction: neutral / informational only\nRegime: " + regime +
+             " | ATR: " + str.tostring(atrPct, "#.###") + "%" :
+             confluenceText(scoreDir, riskUnit)
+
+        bool riskDistanceOk = dir == 0 or
+             math.abs(close - (dir == 1 ? pLow : pHigh)) <= atrV * maxRiskDistanceATR
+        if dir != 0 and not riskDistanceOk
+            confidence := math.max(0, confidence - 10)
+
+        bool tradeReady = dir != 0 and confidence >= minTradeScore and
+             not (avoidChop and strongChop) and riskDistanceOk
+        string validation = dir == 0 ? "INFORMATIONAL - neutral pattern" :
+             confidence >= strongScore ? "HIGH CONFLUENCE" :
+             confidence >= goodScore ? "GOOD CONFLUENCE" : "LOW CONFLUENCE"
+        string actionText = dir == 0 ? "No directional action" :
+             tradeReady and confidence >= strongScore ?
+             (dir == 1 ? "STRONG BUY - confirmation candle required" :
+             "STRONG SELL - confirmation candle required") :
+             tradeReady ?
+             (dir == 1 ? "BUY SETUP - confirmation required" :
+             "SELL SETUP - confirmation required") :
+             strongChop ? "WATCH - market chop filter active" :
+             not riskDistanceOk ? "WATCH - pattern distance too wide" :
+             "WATCH - confluence below threshold"
+
+        float entryPrice = close
+        float stopPrice = dir == 1 ? entryPrice - riskUnit :
+             dir == -1 ? entryPrice + riskUnit : na
+        float target1 = dir == 1 ? entryPrice + riskUnit * rr1 :
+             dir == -1 ? entryPrice - riskUnit * rr1 : na
+        float target2 = dir == 1 ? entryPrice + riskUnit * rr2 :
+             dir == -1 ? entryPrice - riskUnit * rr2 : na
+        string riskTxt = dir == 0 or not showRisk ? "" :
+             "\nEntry (ref): " + str.tostring(entryPrice, format.mintick) +
+             "\nSL: " + str.tostring(stopPrice, format.mintick) +
+             "\nTP1 (" + str.tostring(rr1) + "R): " + str.tostring(target1, format.mintick) +
+             "\nTP2 (" + str.tostring(rr2) + "R): " + str.tostring(target2, format.mintick) +
+             "\nR unit: " + str.tostring(riskUnit, format.mintick)
+
+        string bodyTxt = SEP + "\nPattern: Valid ✓\n" + trendTxt + "\n" + checks +
+             "\n" + SEP +
+             (dir == 0 ? "\nConfluence score: informational" :
+             "\nConfluence score: " + str.tostring(confidence) + "% / 100" +
+             "\nAssessment: " + validation +
+             "\nBias: " + actionText + riskTxt) +
+             "\n" + SEP + "\n" + desc + "\n" + sltp +
+             "\nReference reliability: " + qualityText(relPct) +
+             " · Ideal TF: " + tfHuman +
+             "\nNote: the score is confluence quality, not a win probability."
+
+        PatternInst inst = PatternInst.new(
+             na, bar_index, pHigh, pLow, dir, dir == 0 ? 3 : 0,
+             abbr, pname, bodyTxt, confidence,
+             dir == 1 ? colBull : dir == -1 ? colBear : colNeut)
+
+        if not confirmedOnly or dir == 0
+            drawPattern(inst)
+
+        array.push(insts, inst)
+
+        if array.size(insts) > 450
+            PatternInst old = array.shift(insts)
+            if not na(old.lb)
+                label.delete(old.lb)
+
+        if fireAlerts and tradeReady
+            alert(abbr + " " + (dir == 1 ? "BUY" : "SELL") + " setup · score " +
+                 str.tostring(confidence) + "% · " + syminfo.ticker + " " +
+                 timeframe.period, alert.freq_once_per_bar_close)
+
+// ═════════════════════════════ SHAPE DEFINITIONS ═══════════════════════════
+
+// ── Single candle ───────────────────────────────────────────────────────────
+// Hammer / inverted hammer: small body at one extreme, dominant shadow on the
+// other side (at least 2x the body AND at least 55% of the range), stub shadow
+// opposite. The 55% rule is what separates a real pin bar from a small candle.
+hammerShape = minRange and body > rng * 0.10 and body <= rng * 0.40 and
+     loW >= 2.0 * body and loW >= rng * 0.55 and upW <= rng * 0.20
+
+invHamShape = minRange and body > rng * 0.10 and body <= rng * 0.40 and
+     upW >= 2.0 * body and upW >= rng * 0.55 and loW <= rng * 0.20
+
+// Marubozu: textbook definition is open = low and close = high. A per-side
+// tolerance keeps it usable on feeds that print small execution ticks.
+maruTol = math.max(rng * maruWickPct, syminfo.mintick * maruWickTicks)
+maruBullShape = bullC and longBody and rng > 0 and body >= rng * 0.90 and
+     upW <= maruTol and loW <= maruTol
+maruBearShape = bearC and longBody and rng > 0 and body >= rng * 0.90 and
+     upW <= maruTol and loW <= maruTol
+
+dojiShape = rng > 0 and body <= rng * 0.10
+fourPriceShape = rng <= math.max(syminfo.mintick * 2.0, atrV * 0.05) and
+     math.abs(open - close) <= syminfo.mintick * 2.0
+dragonShape = dojiShape and minRange and loW >= rng * 0.60 and upW <= rng * 0.10
+graveShape = dojiShape and minRange and upW >= rng * 0.60 and loW <= rng * 0.10
+longLegShape = dojiShape and not dragonShape and not graveShape and
+     rng >= atrV * 1.10 and upW >= rng * 0.35 and loW >= rng * 0.35
+plainDoji = dojiShape and not dragonShape and not graveShape and
+     not longLegShape and not fourPriceShape
+// Spinning top: small body with both shadows longer than the body and roughly
+// balanced. Without the balance rule a pin bar would qualify as indecision.
+shadowMax = math.max(upW, loW)
+shadowMin = math.min(upW, loW)
+spinTopShape = minRange and rng > 0 and not dojiShape and bodyPct <= 0.30 and
+     upW >= body and loW >= body and shadowMax > 0 and
+     shadowMin >= shadowMax * 0.40
+
+// ── Double candle ───────────────────────────────────────────────────────────
+// Engulfing is body based. Candle 1 must have a real body (engulfing a doji is
+// not an engulfing) and candle 2 must clearly dominate it.
+becShape = bearC[1] and bullC and body[1] >= atrV * 0.15 and
+     open <= close[1] and close >= open[1] and body >= body[1] * 1.10 and
+     body >= atrV * 0.40
+
+breShape = bullC[1] and bearC and body[1] >= atrV * 0.15 and
+     open >= close[1] and close <= open[1] and body >= body[1] * 1.10 and
+     body >= atrV * 0.40
+
+insideBody = bodyTop <= math.max(open[1], close[1]) and
+     bodyBot >= math.min(open[1], close[1])
+
+bullHaramiShape = bearC[1] and longBody[1] and bullC and
+     not dojiShape and insideBody and body <= body[1] * 0.60
+
+bearHaramiShape = bullC[1] and longBody[1] and bearC and
+     not dojiShape and insideBody and body <= body[1] * 0.60
+
+haramiCrossShape = longBody[1] and dojiShape and insideBody
+
+// Piercing / dark cloud: opens beyond the prior close, closes through more
+// than 50% of the prior body but not through it entirely (that is engulfing).
+piercingShape = bearC[1] and longBody[1] and bullC and
+     open < close[1] and close > prevBodyMid and close < open[1]
+
+darkCloudShape = bullC[1] and longBody[1] and bearC and
+     open > close[1] and close < prevBodyMid and close > open[1]
+
+tweezerBottomShape = bearC[1] and bullC and minRange and
+     math.abs(low - low[1]) <= atrV * 0.10 and body[1] >= atrV * 0.25
+
+tweezerTopShape = bullC[1] and bearC and minRange and
+     math.abs(high - high[1]) <= atrV * 0.10 and body[1] >= atrV * 0.25
+
+// Matching low: two bearish candles closing at the same level, the second not
+// opening materially lower (selling losing ground rather than accelerating).
+matchingLowShape = bearC[1] and bearC and
+     math.abs(close - close[1]) <= atrV * 0.10 and
+     open >= open[1] - atrV * 0.10 and body[1] >= atrV * 0.25
+
+// Matching high: two bullish candles opening at the same level, neither making
+// a meaningful new close. Not the same structure as a tweezer top.
+matchingHighShape = bullC[1] and bullC and
+     math.abs(open - open[1]) <= atrV * 0.10 and
+     close <= close[1] + atrV * 0.20 and body[1] >= atrV * 0.25
+
+// Kicking: bearish marubozu, true gap up, bullish marubozu, no body overlap.
+kickingShape = maruBearShape[1] and maruBullShape and bodyGapUp
+
+// ── Triple and multi candle ─────────────────────────────────────────────────
+c1Mid3 = (open[2] + close[2]) / 2.0
+
+morningStarShape = bearC[2] and longBody[2] and smallBody[1] and
+     math.max(open[1], close[1]) <= c1Mid3 and
+     bullC and midBody and close >= c1Mid3
+
+eveningStarShape = bullC[2] and longBody[2] and smallBody[1] and
+     math.min(open[1], close[1]) >= c1Mid3 and
+     bearC and midBody and close <= c1Mid3
+
+morningDojiShape = morningStarShape and dojiShape[1]
+eveningDojiShape = eveningStarShape and dojiShape[1]
+
+threeWhiteSoldiersShape =
+     bullC and bullC[1] and bullC[2] and
+     close > close[1] and close[1] > close[2] and
+     body >= atrV * 0.50 and body[1] >= atrV * 0.50 and body[2] >= atrV * 0.50 and
+     openInside0 and openInside1 and
+     upW <= body * 0.30 and upW[1] <= body[1] * 0.30 and
+     upW[2] <= body[2] * 0.30
+
+threeBlackCrowsShape =
+     bearC and bearC[1] and bearC[2] and
+     close < close[1] and close[1] < close[2] and
+     body >= atrV * 0.50 and body[1] >= atrV * 0.50 and body[2] >= atrV * 0.50 and
+     openInside0 and openInside1 and
+     loW <= body * 0.30 and loW[1] <= body[1] * 0.30 and
+     loW[2] <= body[2] * 0.30
+
+// Stick sandwich: red, green, red with the outer closes matching.
+stickSandwichShape = bearC[2] and bullC[1] and bearC and
+     math.abs(close - close[2]) <= atrV * 0.10 and body[2] >= atrV * 0.30
+
+// Three inside: a true harami plus a third candle closing beyond candle 1.
+threeInsideUpShape = bullHaramiShape[1] and bullC and close > high[2]
+threeInsideDownShape = bearHaramiShape[1] and bearC and close < low[2]
+
+// Three outside: engulfing plus follow-through.
+threeOutsideUpShape = becShape[1] and bullC and close > close[1]
+threeOutsideDownShape = breShape[1] and bearC and close < close[1]
+
+// Five-candle continuation: three contained pause candles inside candle 1.
+pauseInC1 =
+     high[1] <= high[4] and low[1] >= low[4] and
+     high[2] <= high[4] and low[2] >= low[4] and
+     high[3] <= high[4] and low[3] >= low[4] and
+     body[1] < body[4] and body[2] < body[4] and body[3] < body[4]
+
+risingThreeShape = bullC[4] and longBody[4] and pauseInC1 and
+     bullC and longBody and close > high[4]
+
+fallingThreeShape = bearC[4] and longBody[4] and pauseInC1 and
+     bearC and longBody and close < low[4]
+
+// Breakaway bullish: long red, gap down, small candles failing to extend the
+// decline, then a strong green closing back inside candle 1's body.
+breakawayBullShape =
+     bearC[4] and longBody[4] and
+     open[3] < low[4] and
+     body[3] <= body[4] * 0.50 and
+     body[2] <= body[4] * 0.50 and
+     body[1] <= body[4] * 0.50 and
+     bullC and longBody and
+     close > close[4] and close < open[4]
+
+// Ladder bottom: three declining reds, a fourth red with an UPPER shadow (the
+// failed rebound attempt), then a strong green opening above candle 4's open.
+ladderBottomShape =
+     bearC[4] and bearC[3] and bearC[2] and
+     close[3] < close[4] and close[2] < close[3] and
+     high[3] < high[4] and high[2] < high[3] and
+     bearC[1] and upW[1] >= body[1] * 0.30 and
+     bullC and open > open[1] and longBody
+
+// Concealing baby swallow: four bearish candles. Candle 3 gaps down, its upper
+// shadow reaches into candle 2's body, and candle 4 fully engulfs candle 3.
+concealingBabySwallowShape =
+     bearC[3] and longBody[3] and
+     bearC[2] and longBody[2] and
+     bearC[1] and
+     open[1] < low[2] and
+     high[1] >= close[2] and high[1] <= open[2] and
+     bearC and
+     high >= high[1] and low <= low[1] and
+     body > body[1]
+
+// Unique three river: long red, a hammer making a lower low, then a small
+// bullish candle whose body sits inside the hammer body.
+uniqueThreeRiverShape =
+     bearC[2] and longBody[2] and
+     loW[1] >= 2.0 * body[1] and
+     upW[1] <= body[1] * 0.50 and
+     low[1] < low[2] and
+     bullC and smallBody and
+     bodyTop <= math.max(open[1], close[1]) and
+     bodyBot >= math.min(open[1], close[1])
+
+// Tri-star bullish: three dojis with the middle one at the extreme low. A true
+// gap on both sides is vanishingly rare on FX, so separation is the
+// requirement and a gap simply strengthens the read.
+triStarShape =
+     dojiShape[2] and dojiShape[1] and dojiShape and
+     low[1] < low[2] and low[1] < low and
+     high[1] < math.max(high[2], high)
+
+// Advance block: three bullish candles, bodies shrinking, upper shadows
+// growing - higher prices bought with less and less efficiency.
+advanceBlockShape =
+     bullC and bullC[1] and bullC[2] and
+     body[2] > body[1] and body[1] > body and
+     upW[2] < upW[1] and upW[1] < upW and
+     openInside0 and openInside1 and
+     close > close[1] and close[1] > close[2] and
+     body[2] >= atrV * 0.40
+
+// Deliberation: two strong advancing candles then a small candle with an upper
+// shadow that opens inside candle 2's body.
+deliberationShape =
+     bullC[2] and bullC[1] and
+     body[2] >= atrV * 0.50 and body[1] >= atrV * 0.50 and
+     close[1] > close[2] and
+     openInside1 and
+     smallBody and upW >= body and
+     open >= math.min(open[1], close[1]) and
+     open <= math.max(open[1], close[1])
+
+// Ladder top: mirror of the ladder bottom.
+ladderTopShape =
+     bullC[4] and bullC[3] and bullC[2] and
+     close[3] > close[4] and close[2] > close[3] and
+     high[3] > high[4] and high[2] > high[3] and
+     body[1] <= body[2] * 0.75 and
+     loW[1] >= body[1] * 0.30 and
+     bearC and longBody and
+     open < math.min(open[1], close[1]) and
+     close < low[1]
+
+// ═════════════════════════════ DETECTION / FIRE ═════════════════════════════
+
+if barstate.isconfirmed
+
+    // 01 Hammer
+    if hammerShape and downTrend[1]
+        fire(p01, 1, "M", "BR", 1, "60,240,1D", "HAM", "Hammer", 72,
+             "Trend: Downtrend ✓",
+             "Small body near the top of the range with a lower shadow at least 2x the body. " +
+             "The rejection only matters after a decline and near support.",
+             "SL: below the hammer low | TP: nearest resistance / prior swing high",
+             "H1 · H4 · D1", high, low)
+
+    // 02 Hanging Man
+    if hammerShape and upTrend[1]
+        fire(p02, 1, "I", "SR", -1, "60,240,1D", "HGM", "Hanging Man", 62,
+             "Trend: Uptrend ✓",
+             "Hammer anatomy after an advance. The long lower shadow shows sellers " +
+             "were able to push price down sharply inside the session.",
+             "SL: above the pattern high | TP: nearest support / swing low",
+             "H1 · H4 · D1", high, low)
+
+    // 03 Inverted Hammer
+    if invHamShape and downTrend[1]
+        fire(p03, 1, "M", "BR", 1, "60,240,1D", "IH", "Inverted Hammer", 65,
+             "Trend: Downtrend ✓",
+             "Small body near the bottom with a long upper shadow after a decline. " +
+             "The upward attempt needs bullish follow-through to matter.",
+             "SL: below the pattern low | TP: nearest resistance / swing high",
+             "H1 · H4 · D1", high, low)
+
+    // 04 Shooting Star
+    if invHamShape and upTrend[1]
+        fire(p04, 1, "M", "SR", -1, "60,240,1D", "SST", "Shooting Star", 68,
+             "Trend: Uptrend ✓",
+             "Inverted-hammer anatomy at the top of an advance. The long upper " +
+             "shadow is rejection of higher prices.",
+             "SL: above the pattern high | TP: nearest support / swing low",
+             "H1 · H4 · D1", high, low)
+
+    // 05 Bullish Marubozu
+    if maruBullShape
+        fire(p05, 1, "M", "CT", 1, "15,60,1D", "BUM", "Bullish Marubozu", 74,
+             "Context: Momentum candle",
+             "Large bullish body with effectively no shadows: one-sided buying from " +
+             "open to close. Location decides whether continuation is likely.",
+             "SL: below the candle low (or body midpoint) | TP: next resistance / measured move",
+             "M15 · H1 · D1", high, low)
+
+    // 06 Bearish Marubozu
+    if maruBearShape
+        fire(p06, 1, "M", "CT", -1, "15,60,1D", "BEM", "Bearish Marubozu", 74,
+             "Context: Momentum candle",
+             "Large bearish body with effectively no shadows: unopposed selling from " +
+             "open to close.",
+             "SL: above the candle high (or body midpoint) | TP: next support / measured move",
+             "M15 · H1 · D1", high, low)
+
+    // 07 Spinning Top
+    if spinTopShape
+        fire(p07, 1, "I", "IN", 0, "ALL", "SPT", "Spinning Top", 55,
+             "Context: Indecision",
+             "Small real body with balanced upper and lower shadows: a draw, not an " +
+             "automatic reversal.",
+             "SL/TP: trade the eventual range breakout using nearby structure",
+             "All TFs", high, low)
+
+    // 08 Standard Doji
+    if plainDoji and minRange and not haramiCrossShape
+        fire(p08, 1, "I", "IN", 0, "60,240,1D", "DOJ", "Standard Doji", 58,
+             "Context: Indecision",
+             "Open and close are effectively equal. After an extended move it warns of " +
+             "momentum loss, but it is never a standalone reversal.",
+             "SL/TP: wait for a directional break of the doji range",
+             "H1 · H4 · D1", high, low)
+
+    // 09 Long-Legged Doji
+    if longLegShape
+        fire(p09, 1, "I", "IN", 0, "240,1D", "LLD", "Long-Legged Doji", 60,
+             "Context: Volatility / indecision",
+             "Open and close are near each other despite a wide two-sided range: strong " +
+             "rejection in both directions.",
+             "SL/TP: use the breakout side and project the doji range",
+             "H4 · D1", high, low)
+
+    // 10 Dragonfly Doji
+    if dragonShape and downTrend[1]
+        fire(p10, 1, "I", "BR", 1, "60,240,1D", "DFD", "Dragonfly Doji", 66,
+             "Trend: Downtrend ✓",
+             "Open, close and high cluster near the high while a long lower shadow " +
+             "shows strong rejection of lower prices.",
+             "SL: below the lower shadow | TP: nearest resistance",
+             "H1 · H4 · D1", high, low)
+
+    // 11 Gravestone Doji
+    if graveShape and upTrend[1]
+        fire(p11, 1, "I", "SR", -1, "60,240,1D", "GSD", "Gravestone Doji", 66,
+             "Trend: Uptrend ✓",
+             "Open, close and low cluster near the low while a long upper shadow " +
+             "shows rejection of higher prices.",
+             "SL: above the upper shadow | TP: nearest support",
+             "H1 · H4 · D1", high, low)
+
+    // 12 Four Price Doji
+    if fourPriceShape
+        fire(p12, 1, "R", "IN", 0, "1D,1W", "FPD", "Four Price Doji", 50,
+             "Context: Extremely narrow / inactive bar",
+             "Open, high, low and close are effectively identical: a market-condition " +
+             "marker (illiquidity, pre-news vacuum), not a reversal signal.",
+             "SL/TP: none from the pattern; wait for directional expansion",
+             "D1 · W1", high, low)
+
+    // 13 Bullish Engulfing
+    if becShape and downTrend[2]
+        fire(p13, 2, "M", "BR", 1, "60,240,1D", "BEC", "Bullish Engulfing", 78,
+             "Trend: Downtrend ✓",
+             "The bullish real body fully engulfs the prior bearish real body. The " +
+             "definition is body based; shadows may exceed it.",
+             "SL: below the engulfing low | TP: nearest resistance / swing high",
+             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 14 Bearish Engulfing
+    if breShape and upTrend[2]
+        fire(p14, 2, "M", "SR", -1, "60,240,1D", "BRE", "Bearish Engulfing", 78,
+             "Trend: Uptrend ✓",
+             "The bearish real body fully engulfs the prior bullish real body: an " +
+             "immediate transfer of control to sellers.",
+             "SL: above the engulfing high | TP: nearest support / swing low",
+             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 15 Bullish Harami
+    if bullHaramiShape and downTrend[2]
+        fire(p15, 2, "I", "BR", 1, "240,1D", "BUH", "Bullish Harami", 64,
+             "Trend: Downtrend ✓",
+             "A small bullish body sits completely inside the preceding large bearish " +
+             "body: selling pressure suddenly losing steam.",
+             "SL: below candle 1 low | TP: nearest resistance / candle 1 body top",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 16 Bearish Harami
+    if bearHaramiShape and upTrend[2]
+        fire(p16, 2, "I", "SR", -1, "240,1D", "BEH", "Bearish Harami", 64,
+             "Trend: Uptrend ✓",
+             "A small bearish body sits completely inside the preceding large bullish " +
+             "body: buyers losing momentum.",
+             "SL: above candle 1 high | TP: nearest support / candle 1 body bottom",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 17 Harami Cross
+    if haramiCrossShape and (upTrend[2] or downTrend[2])
+        fire(p17, 2, "I", "IN", 0, "240,1D", "HC", "Harami Cross", 66,
+             upTrend[2] ? "Trend: Uptrend ✓" : "Trend: Downtrend ✓",
+             "A doji contained inside the previous long real body: total doubt right " +
+             "after a conviction candle. It needs a directional break.",
+             "SL/TP: wait for the break of the pattern range",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 18 Piercing Line
+    if piercingShape and downTrend[2]
+        fire(p18, 2, "M", "BR", 1, "240,1D", "PL", "Piercing Line", 70,
+             "Trend: Downtrend ✓",
+             "A bearish candle followed by a bullish candle that opens below the prior " +
+             "close and closes back above the midpoint of the prior body.",
+             "SL: below candle 2 low | TP: nearest resistance",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 19 Dark Cloud Cover
+    if darkCloudShape and upTrend[2]
+        fire(p19, 2, "M", "SR", -1, "240,1D", "DCC", "Dark Cloud Cover", 70,
+             "Trend: Uptrend ✓",
+             "A bullish candle followed by a bearish candle that opens above the prior " +
+             "close and closes below the prior body's midpoint.",
+             "SL: above candle 2 high | TP: nearest support",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 20 Tweezer Bottom
+    if tweezerBottomShape and downTrend[2]
+        fire(p20, 2, "I", "BR", 1, "60,240,1D", "TWB", "Tweezer Bottom", 67,
+             "Trend: Downtrend ✓",
+             "A bearish candle then a bullish candle sharing the same low. Two " +
+             "rejections from one level means real demand defending it.",
+             "SL: below the twin lows | TP: nearest resistance / swing high",
+             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 21 Tweezer Top
+    if tweezerTopShape and upTrend[2]
+        fire(p21, 2, "I", "SR", -1, "60,240,1D", "TWT", "Tweezer Top", 67,
+             "Trend: Uptrend ✓",
+             "A bullish candle then a bearish candle sharing the same high: real supply " +
+             "capping the advance.",
+             "SL: above the twin highs | TP: nearest support / swing low",
+             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 22 Matching Low
+    if matchingLowShape and downTrend[2]
+        fire(p22, 2, "R", "BR", 1, "240,1D", "ML", "Matching Low", 62,
+             "Trend: Downtrend ✓",
+             "Two bearish candles closing at the same level: sellers out of ammunition " +
+             "at that price. Confirmation is mandatory.",
+             "SL: below the matching close | TP: nearest resistance",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 23 Matching High
+    if matchingHighShape and upTrend[2]
+        fire(p23, 2, "R", "SR", -1, "240,1D", "MH", "Matching High", 62,
+             "Trend: Uptrend ✓",
+             "Two bullish candles opening at the same level with no meaningful new " +
+             "close: a stalled buyer thrust. Not the same as a tweezer top.",
+             "SL: above the formation high | TP: nearest support",
+             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 24 Stick Sandwich
+    if stickSandwichShape and downTrend[3]
+        fire(p24, 3, "R", "BR", 1, "1D", "SSW", "Stick Sandwich", 60,
+             "Trend: Downtrend ✓",
+             "Bearish, bullish, bearish with the first and third closes matching. The " +
+             "shared close becomes the support that must hold.",
+             "SL: below the twin-close level | TP: nearest resistance",
+             "D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 25 Kicking Pattern
+    if kickingShape and downTrend[2]
+        fire(p25, 2, "R", "BR", 1, "1D", "KCK", "Kicking Pattern (Bullish)", 72,
+             "Trend: End of downtrend ✓",
+             "Bearish marubozu, a true gap up, then a bullish marubozu with no body " +
+             "overlap. The gap IS the pattern. Spot forex gaps far less often.",
+             "SL: below the gap / candle 2 low | TP: next resistance",
+             "D1", math.max(high, high[1]), math.min(low, low[1]))
+
+    // 26 Morning Star
+    if morningStarShape and not dojiShape[1] and downTrend[3]
+        fire(p26, 3, "M", "BR", 1, "240,1D", "MS", "Morning Star", 76,
+             "Trend: Mature downtrend ✓",
+             "Long bearish candle, small star, then a strong bullish candle closing back " +
+             "into at least the midpoint of candle 1.",
+             "SL: below the star low | TP: nearest resistance / swing high",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 27 Evening Star
+    if eveningStarShape and not dojiShape[1] and upTrend[3]
+        fire(p27, 3, "M", "SR", -1, "240,1D", "ES", "Evening Star", 76,
+             "Trend: Mature uptrend ✓",
+             "Long bullish candle, small star, then a strong bearish candle closing back " +
+             "into at least the midpoint of candle 1.",
+             "SL: above the star high | TP: nearest support / swing low",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 28 Morning Doji Star
+    if morningDojiShape and downTrend[3]
+        fire(p28, 3, "I", "BR", 1, "240,1D", "MDS", "Morning Doji Star", 78,
+             "Trend: Long downtrend ✓",
+             "Morning star with a doji as the star: sellers cannot even close lower. " +
+             "Candle 3 must still recover into candle 1's body.",
+             "SL: below the doji low | TP: nearest resistance",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 29 Evening Doji Star
+    if eveningDojiShape and upTrend[3]
+        fire(p29, 3, "I", "SR", -1, "240,1D", "EDS", "Evening Doji Star", 78,
+             "Trend: Long uptrend ✓",
+             "Evening star with a doji as the star. Candle 3 must recover into candle " +
+             "1's body.",
+             "SL: above the doji high | TP: nearest support",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 30 Three White Soldiers
+    if threeWhiteSoldiersShape and not upTrend[3]
+        fire(p30, 3, "M", "BR", 1, "240,1D", "TWS", "Three White Soldiers", 75,
+             "Trend: Downtrend / consolidation breakout ✓",
+             "Three consecutive bullish candles, each opening inside the prior body, " +
+             "higher closes and short upper shadows: sustained commitment.",
+             "SL: below candle 1 low or the last candle midpoint | TP: structure / trail",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 31 Three Black Crows
+    if threeBlackCrowsShape and not downTrend[3]
+        fire(p31, 3, "M", "SR", -1, "240,1D", "TBC", "Three Black Crows", 75,
+             "Trend: Uptrend / consolidation breakdown ✓",
+             "Three consecutive bearish candles, opens inside the prior body, lower " +
+             "closes and short lower shadows: sustained distribution.",
+             "SL: above candle 1 high or the last candle midpoint | TP: structure / trail",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 32 Three Inside Up
+    if threeInsideUpShape and downTrend[3]
+        fire(p32, 3, "I", "BR", 1, "240,1D", "TIU", "Three Inside Up", 71,
+             "Trend: Downtrend ✓",
+             "Bullish harami confirmed by a third bullish candle closing above candle " +
+             "1's high. The third candle IS the confirmation.",
+             "SL: below candle 1 low | TP: nearest resistance",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 33 Three Inside Down
+    if threeInsideDownShape and upTrend[3]
+        fire(p33, 3, "I", "SR", -1, "240,1D", "TID", "Three Inside Down", 71,
+             "Trend: Uptrend ✓",
+             "Bearish harami confirmed by a third bearish candle closing below candle " +
+             "1's low.",
+             "SL: above candle 1 high | TP: nearest support",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 34 Three Outside Up
+    if threeOutsideUpShape and downTrend[3]
+        fire(p34, 3, "I", "BR", 1, "240,1D", "TOU", "Three Outside Up", 73,
+             "Trend: Downtrend ✓",
+             "Bullish engulfing followed by a third bullish candle making a higher " +
+             "close: buyers take over and keep pressing.",
+             "SL: below the engulfing low | TP: nearest resistance",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 35 Three Outside Down
+    if threeOutsideDownShape and upTrend[3]
+        fire(p35, 3, "I", "SR", -1, "240,1D", "TOD", "Three Outside Down", 73,
+             "Trend: Uptrend ✓",
+             "Bearish engulfing followed by a third bearish candle making a lower close.",
+             "SL: above the engulfing high | TP: nearest support",
+             "H4 · D1", math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 36 Rising Three Methods
+    if risingThreeShape and upTrend[4]
+        fire(p36, 3, "I", "CT", 1, "240,1D", "RTM", "Rising Three Methods", 70,
+             "Trend: Healthy uptrend ✓",
+             "Long bullish candle, three smaller candles fully contained in its range, " +
+             "then a long bullish candle breaking above candle 1: healthy consolidation.",
+             "SL: below the small-candle group | TP: candle 1 height projected / trail",
+             "H4 · D1",
+             math.max(high, math.max(math.max(high[1], high[2]),
+             math.max(high[3], high[4]))),
+             math.min(low, math.min(math.min(low[1], low[2]),
+             math.min(low[3], low[4]))))
+
+    // 37 Falling Three Methods
+    if fallingThreeShape and downTrend[4]
+        fire(p37, 3, "I", "CT", -1, "240,1D", "FTM", "Falling Three Methods", 70,
+             "Trend: Healthy downtrend ✓",
+             "Long bearish candle, three smaller candles contained in its range, then a " +
+             "long bearish candle breaking below candle 1.",
+             "SL: above the small-candle group | TP: candle 1 height projected / trail",
+             "H4 · D1",
+             math.max(high, math.max(math.max(high[1], high[2]),
+             math.max(high[3], high[4]))),
+             math.min(low, math.min(math.min(low[1], low[2]),
+             math.min(low[3], low[4]))))
+
+    // 38 Breakaway Bullish
+    if breakawayBullShape and downTrend[5]
+        fire(p38, 3, "R", "BR", 1, "1D", "BWY", "Breakaway (Bullish)", 68,
+             "Trend: End of downtrend ✓",
+             "Long bearish candle, gap down, small candles failing to extend the decline, " +
+             "then a strong bullish candle reclaiming the gap into candle 1's body.",
+             "SL: below the small-candle group | TP: candle 1 close, then next resistance",
+             "D1",
+             math.max(high, math.max(math.max(high[1], high[2]), high[3])),
+             math.min(low, math.min(math.min(low[1], low[2]), low[3])))
+
+    // 39 Ladder Bottom
+    if ladderBottomShape and downTrend[5]
+        fire(p39, 3, "R", "BR", 1, "1D", "LDB", "Ladder Bottom", 69,
+             "Trend: Final phase of downtrend ✓",
+             "Three declining bearish candles, a fourth bearish candle with an upper " +
+             "shadow (failed rebound), then a strong bullish candle opening above it.",
+             "SL: below the pattern low | TP: nearest resistance / ladder height",
+             "D1",
+             math.max(high, math.max(math.max(high[1], high[2]),
+             math.max(high[3], high[4]))),
+             math.min(low, math.min(math.min(low[1], low[2]),
+             math.min(low[3], low[4]))))
+
+    // 40 Concealing Baby Swallow
+    if concealingBabySwallowShape and downTrend[4]
+        fire(p40, 3, "R", "BR", 1, "1D", "CBS", "Concealing Baby Swallow", 67,
+             "Trend: Deep downtrend ✓",
+             "Four-candle capitulation structure: candle 3 gaps down with its upper " +
+             "shadow into candle 2's body, and candle 4 engulfs it entirely.",
+             "SL: below candle 4 low | TP: nearest resistance (needs a bullish candle 5)",
+             "D1",
+             math.max(high, math.max(high[1], math.max(high[2], high[3]))),
+             math.min(low, math.min(low[1], math.min(low[2], low[3]))))
+
+    // 41 Unique Three River
+    if uniqueThreeRiverShape and downTrend[3]
+        fire(p41, 3, "R", "BR", 1, "1D", "UTR", "Unique Three River", 65,
+             "Trend: Deep downtrend ✓",
+             "Long bearish candle, a hammer making a new low, then a small bullish candle " +
+             "inside the hammer body: seller hesitation, not a standalone entry.",
+             "SL: below the hammer low | TP: nearest resistance (conservative)",
+             "D1",
+             math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 42 Tri-Star
+    if triStarShape and downTrend[3]
+        fire(p42, 3, "R", "BR", 1, "1D,1W", "TS", "Tri-Star (Bullish)", 71,
+             "Trend: Long downtrend ✓",
+             "Three consecutive dojis with the middle one at the extreme: a complete " +
+             "directional vacuum at the end of a decline.",
+             "SL: below the middle doji low | TP: nearest resistance / trail",
+             "D1 · W1",
+             math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 43 Advance Block
+    if advanceBlockShape and upTrend[3]
+        fire(p43, 3, "I", "SR", -1, "240,1D", "AB", "Advance Block", 64,
+             "Trend: Late uptrend ✓",
+             "Three bullish candles keep advancing, but bodies shrink while upper shadows " +
+             "grow: rising prices with falling buying efficiency.",
+             "SL: above the pattern high | TP: nearest support after confirmation",
+             "H4 · D1",
+             math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 44 Deliberation
+    if deliberationShape and upTrend[3]
+        fire(p44, 3, "I", "SR", -1, "240,1D", "DEL", "Deliberation", 63,
+             "Trend: Mature uptrend ✓",
+             "Two advancing bullish candles followed by a small candle with an upper " +
+             "shadow opening inside candle 2's body: collective hesitation.",
+             "SL: above the pattern high | TP: nearest support after confirmation",
+             "H4 · D1",
+             math.max(high, math.max(high[1], high[2])),
+             math.min(low, math.min(low[1], low[2])))
+
+    // 45 Ladder Top
+    if ladderTopShape and upTrend[5]
+        fire(p45, 3, "R", "SR", -1, "1D", "LDT", "Ladder Top", 62,
+             "Trend: Mature uptrend ✓",
+             "Three rising bullish candles, a smaller fourth candle with lower rejection, " +
+             "then a strong bearish candle closing below candle 4's low. The bearish " +
+             "break is the confirmation.",
+             "SL: above the pattern high | TP: nearest support / swing low",
+             "D1",
+             math.max(high, math.max(high[1], math.max(high[2],
+             math.max(high[3], math.max(high[4], high[5]))))),
+             math.min(low, math.min(low[1], math.min(low[2],
+             math.min(low[3], math.min(low[4], low[5]))))))
+
+// ═════════════════════════════ ALERT CONDITIONS ═════════════════════════════
+
+int latestConfidence = array.size(insts) > 0 ?
+     array.get(insts, array.size(insts) - 1).confidence : 0
+int latestDir = array.size(insts) > 0 ?
+     array.get(insts, array.size(insts) - 1).dir : 0
+int latestPatternBar = array.size(insts) > 0 ?
+     array.get(insts, array.size(insts) - 1).barIdx : -1
+
+freshPattern = barstate.isconfirmed and latestPatternBar == bar_index
+strongBuyAlert = freshPattern and latestDir == 1 and
+     latestConfidence >= strongScore and htfBullAlign and not strongChop and bullC
+strongSellAlert = freshPattern and latestDir == -1 and
+     latestConfidence >= strongScore and htfBearAlign and not strongChop and bearC
+bullBreakAlert = barstate.isconfirmed and bullBOSEvent
+bearBreakAlert = barstate.isconfirmed and bearBOSEvent
+
+alertcondition(strongBuyAlert, "Strong Buy",
+     "CandleMaster Pro: strong bullish confluence on a confirmed bar.")
+alertcondition(strongSellAlert, "Strong Sell",
+     "CandleMaster Pro: strong bearish confluence on a confirmed bar.")
+alertcondition(bullBreakAlert, "Bullish BOS/CHOCH",
+     "CandleMaster Pro: bullish structure break confirmed.")
+alertcondition(bearBreakAlert, "Bearish BOS/CHOCH",
+     "CandleMaster Pro: bearish structure break confirmed.")
+
+// ═════════════════════════ DISPLAY / STRUCTURE OBJECTS ═════════════════════
+
+var line lastBullBreakLine = na
+var line lastBearBreakLine = na
+var label lastStructureLabel = na
+
+if barstate.isconfirmed and showStructure
+    if bullBOSEvent
+        if not na(lastBullBreakLine)
+            line.delete(lastBullBreakLine)
+        lastBullBreakLine := line.new(bar_index - 1, brokenSwingHigh,
+             bar_index, brokenSwingHigh, xloc = xloc.bar_index,
+             extend = extend.right, color = color.new(colBull, 20),
+             style = line.style_dashed, width = 2)
+        if not na(lastStructureLabel)
+            label.delete(lastStructureLabel)
+        lastStructureLabel := label.new(bar_index, brokenSwingHigh,
+             bullCHOCH ? "CHOCH+" : "BOS+",
+             xloc = xloc.bar_index, yloc = yloc.price,
+             style = label.style_label_down,
+             color = color.new(colBull, bullCHOCH ? 10 : 15),
+             textcolor = color.white, size = size.tiny,
+             tooltip = bullCHOCH ?
+             "Change of Character\nConfirmed bullish break after bearish structure.\nStructure context, not a guaranteed reversal." :
+             "Bullish Break of Structure\nConfirmed close above the latest confirmed swing high.")
+    if bearBOSEvent
+        if not na(lastBearBreakLine)
+            line.delete(lastBearBreakLine)
+        lastBearBreakLine := line.new(bar_index - 1, brokenSwingLow,
+             bar_index, brokenSwingLow, xloc = xloc.bar_index,
+             extend = extend.right, color = color.new(colBear, 20),
+             style = line.style_dashed, width = 2)
+        if not na(lastStructureLabel)
+            label.delete(lastStructureLabel)
+        lastStructureLabel := label.new(bar_index, brokenSwingLow,
+             bearCHOCH ? "CHOCH-" : "BOS-",
+             xloc = xloc.bar_index, yloc = yloc.price,
+             style = label.style_label_up,
+             color = color.new(colBear, bearCHOCH ? 10 : 15),
+             textcolor = color.white, size = size.tiny,
+             tooltip = bearCHOCH ?
+             "Change of Character\nConfirmed bearish break after bullish structure.\nStructure context, not a guaranteed reversal." :
+             "Bearish Break of Structure\nConfirmed close below the latest confirmed swing low.")
+
+plot(showBB ? bbUpper : na, "BB Upper", color = color.new(color.gray, 70))
+plot(showBB ? bbBasis : na, "BB Basis", color = color.new(color.gray, 55))
+plot(showBB ? bbLower : na, "BB Lower", color = color.new(color.gray, 70))
+
+plot(showSR ? recentSupport : na, "Recent support",
+     color = color.new(colBull, 65), style = plot.style_linebr)
+plot(showSR ? recentResistance : na, "Recent resistance",
+     color = color.new(colBear, 65), style = plot.style_linebr)
+
+plot(showSD and demandZone ? demandLow : na, "Demand low",
+     color = color.new(colBull, 80), style = plot.style_linebr)
+plot(showSD and demandZone ? demandHigh : na, "Demand high",
+     color = color.new(colBull, 80), style = plot.style_linebr)
+plot(showSD and supplyZone ? supplyLow : na, "Supply low",
+     color = color.new(colBear, 80), style = plot.style_linebr)
+plot(showSD and supplyZone ? supplyHigh : na, "Supply high",
+     color = color.new(colBear, 80), style = plot.style_linebr)
+
+// ═════════════════════════════════ DASHBOARD ════════════════════════════════
+// Pine exposes no chart click events, so per-signal detail lives in each
+// label's tooltip. The panel shows the live confluence read for both sides.
+
+var table dash = table.new(position.top_right, 2, 14, border_width = 1)
+
+if barstate.islast and showPanel
+    int liveScore = math.max(liveBullScore, liveBearScore)
+    string dashSignal = strongChop and avoidChop ? "CHOP" :
+         liveBullScore >= minTradeScore and liveBullScore > liveBearScore ? "BUY BIAS" :
+         liveBearScore >= minTradeScore and liveBearScore > liveBullScore ? "SELL BIAS" : "WATCH"
+    color dashColor = dashSignal == "BUY BIAS" ? colBull :
+         dashSignal == "SELL BIAS" ? colBear :
+         dashSignal == "CHOP" ? colNeut : color.orange
+    string structureState = bullCHOCH ? "CHOCH+" : bearCHOCH ? "CHOCH-" :
+         bullBOSEvent ? "BOS+" : bearBOSEvent ? "BOS-" :
+         structDir == 1 ? "BULL" : structDir == -1 ? "BEAR" : "NONE"
+
+    table.cell(dash, 0, 0, "MASTER", text_color = color.white,
+         bgcolor = color.new(color.black, 10), text_size = size.small)
+    table.cell(dash, 1, 0, dashSignal, text_color = color.white,
+         bgcolor = dashColor, text_size = size.small)
+    table.cell(dash, 0, 1, "Live score", text_color = color.white)
+    table.cell(dash, 1, 1, str.tostring(liveScore) + "%", text_color = color.white)
+    table.cell(dash, 0, 2, "Bull / Bear", text_color = color.white)
+    table.cell(dash, 1, 2, str.tostring(liveBullScore) + " / " +
+         str.tostring(liveBearScore), text_color = color.white)
+    table.cell(dash, 0, 3, "Last pattern", text_color = color.white)
+    table.cell(dash, 1, 3, latestDir == 0 ? "-" :
+         str.tostring(latestConfidence) + "% " + (latestDir == 1 ? "BULL" : "BEAR"),
+         text_color = color.white)
+    table.cell(dash, 0, 4, "Regime", text_color = color.white)
+    table.cell(dash, 1, 4, regime, text_color = color.white)
+    table.cell(dash, 0, 5, "HTF", text_color = color.white)
+    table.cell(dash, 1, 5, htfBias + " " +
+         str.tostring(math.max(htfBullCount, htfBearCount)) + "/" +
+         str.tostring(htfActive), text_color = color.white)
+    table.cell(dash, 0, 6, "RSI", text_color = color.white)
+    table.cell(dash, 1, 6, str.tostring(rsiVal, "#.#"), text_color = color.white)
+    table.cell(dash, 0, 7, "MACD", text_color = color.white)
+    table.cell(dash, 1, 7, macdBullConfirm ? "BULL" :
+         macdBearConfirm ? "BEAR" : "MIXED", text_color = color.white)
+    table.cell(dash, 0, 8, "ADX", text_color = color.white)
+    table.cell(dash, 1, 8, adxAvailable ? str.tostring(adxVal, "#.#") : "N/A",
+         text_color = color.white)
+    table.cell(dash, 0, 9, "Volume", text_color = color.white)
+    table.cell(dash, 1, 9, volAvailable ? (volOk ? "HIGH" : "NORMAL") : "N/A",
+         text_color = color.white)
+    table.cell(dash, 0, 10, "BB", text_color = color.white)
+    table.cell(dash, 1, 10, bbSqueeze ? "SQUEEZE" :
+         bbExpanding ? "EXPANDING" : "NORMAL", text_color = color.white)
+    table.cell(dash, 0, 11, "Structure", text_color = color.white)
+    table.cell(dash, 1, 11, structureState, text_color = color.white)
+    table.cell(dash, 0, 12, "S/R touches", text_color = color.white)
+    table.cell(dash, 1, 12, str.tostring(supTouches) + " / " +
+         str.tostring(resTouches), text_color = color.white)
+    table.cell(dash, 0, 13, "ATR", text_color = color.white)
+    table.cell(dash, 1, 13, str.tostring(atrPct, "#.###") + "%",
+         text_color = color.white)
+
+// ═════════════════════════ PATTERN LIFECYCLE UPDATES ═══════════════════════
+// UDT instances are references, so mutating a field updates the stored object.
+
+if barstate.isconfirmed and array.size(insts) > 0
+    for i = 0 to array.size(insts) - 1
+        PatternInst inst = array.get(insts, i)
+
+        if inst.state == 0 and bar_index > inst.barIdx
+            int newState = 0
+
+            if inst.dir == 1
+                newState := close > inst.patHigh ? 1 : close < inst.patLow ? 2 : 0
+            else if inst.dir == -1
+                newState := close < inst.patLow ? 1 : close > inst.patHigh ? 2 : 0
+
+            if newState == 0 and bar_index - inst.barIdx >= confWindow
+                newState := 4
+
+            if newState != 0
+                inst.state := newState
+
+                if na(inst.lb) and newState == 1
+                    drawPattern(inst)
+
+                if not na(inst.lb)
+                    label.set_tooltip(inst.lb,
+                         inst.abbr + "\n" + inst.pname + "\nStatus: " +
+                         patternStatus(inst) + "\n" + inst.bodyTxt +
+                         (newState == 1 ? "\n\nTrade readiness: CONFIRMED " +
+                         (inst.confidence >= strongScore ? "HIGH-CONFLUENCE " :
+                         inst.confidence >= goodScore ? "GOOD-CONFLUENCE " : "LOW-CONFLUENCE ") +
+                         (inst.dir == 1 ? "BULLISH BIAS." : "BEARISH BIAS.") :
+                         newState == 2 ? "\n\nTrade readiness: FAILED - invalidation level breached." :
+                         newState == 4 ? "\n\nTrade readiness: EXPIRED - no breakout inside the window." : ""))
+
+                    if newState == 2 or newState == 4
+                        label.set_color(inst.lb, color.new(inst.colMain, 75))
