@@ -6,7 +6,20 @@ Gaps, Bollinger regime, RSI, MACD, Stochastic, VWAP, ADX, volume and
 higher-timeframe bias).
 
 **Script:** [`candlestick_master_pro.pine`](candlestick_master_pro.pine)
+**Scalping guide (1–30 min holds):** [`SCALPING.md`](SCALPING.md)
 **Debug/change log:** [`DEBUG_LOG.md`](DEBUG_LOG.md)
+
+## SBS / SSS signals
+
+On top of the pattern labels there is a strong-signal layer: **SBS ▲** (strong
+buy) and **SSS ▼** (strong sell). A signal requires higher-timeframe bias, a
+completed pullback into value, a candlestick or momentum trigger, momentum
+agreement, agreeable structure, an active session, and a target big enough to
+clear the spread. Each one draws entry / stop / TP1 / TP2 lines and carries a
+tooltip with every check, the score, and the pip risk. See
+[`SCALPING.md`](SCALPING.md) for the model and the recommended settings.
+
+The score on a signal is **confluence quality, not a win rate.**
 
 Works on the TradingView free plan. It is an **analysis** indicator: it draws
 labels and reference levels, it never sends broker orders.

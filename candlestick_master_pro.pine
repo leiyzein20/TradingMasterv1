@@ -138,9 +138,9 @@ showSR = input.bool(true, "Show support / resistance", group = grpPro)
 showSD = input.bool(true, "Show supply / demand", group = grpPro)
 showStructure = input.bool(true, "Show BOS / CHOCH", group = grpPro)
 showRisk = input.bool(true, "Show entry / SL / TP", group = grpPro)
-htfA = input.timeframe("60", "HTF 1", group = grpPro)
-htfB = input.timeframe("240", "HTF 2", group = grpPro)
-htfC = input.timeframe("1D", "HTF 3", group = grpPro)
+htfA = input.timeframe("15", "HTF 1 (fast confirmation)", group = grpPro)
+htfB = input.timeframe("60", "HTF 2 (primary bias)", group = grpPro)
+htfC = input.timeframe("1D", "HTF 3 (primary bias)", group = grpPro)
 bbLen = input.int(20, "BB length", group = grpPro, minval = 5)
 bbMult = input.float(2.0, "BB multiplier", group = grpPro, minval = 0.5, step = 0.1)
 atrSLMult = input.float(1.2, "ATR stop multiplier", group = grpPro,
@@ -160,6 +160,71 @@ maxRiskDistanceATR = input.float(3.0, "Maximum pattern distance (x ATR)",
      group = grpPro, minval = 1.0, step = 0.25)
 fireAlerts = input.bool(true, "Send alert() on trade-ready patterns",
      group = grpPro, tooltip = "Create the alert with 'Any alert() function call'.")
+
+// ── Scalping engine ─────────────────────────────────────────────────────────
+// Model: higher-timeframe bias (HTF 2 + HTF 3, i.e. 1H + 1D by default) decides
+// direction; the chart timeframe is only used to time a pullback entry inside
+// that bias. This is the trend-pullback continuation template, which is what
+// survives on 1-15m charts. Momentum chasing is filtered out on purpose.
+grpScalp = "Scalping Engine (1m-15m)"
+scalpMode = input.bool(true, "Scalp mode", group = grpScalp,
+     tooltip = "Allows Must/Important patterns on 1-15m charts and enables the scalp filters, targets and stops below.")
+scalpTfList = input.string("1,2,3,5,15", "Scalp chart timeframes", group = grpScalp)
+fastLen = input.int(9, "Fast EMA (entry trigger)", group = grpScalp, minval = 2)
+midLen = input.int(21, "Mid EMA (pullback band)", group = grpScalp, minval = 3)
+requireBothHTF = input.bool(true, "Require BOTH bias timeframes to agree",
+     group = grpScalp,
+     tooltip = "ON: HTF 2 and HTF 3 (1H and 1D) must both point the same way before a strong signal is allowed.")
+maxExtATR = input.float(1.5, "Reject entries further than (x ATR) from fast EMA",
+     group = grpScalp, minval = 0.25, step = 0.25,
+     tooltip = "The single most common scalping loss: entering after the move already ran. This rejects extended candles.")
+maxRsiChase = input.float(78.0, "Do not buy above RSI (mirrored for sells)",
+     group = grpScalp, minval = 55.0, maxval = 95.0, step = 1.0)
+useSession = input.bool(true, "Only signal inside killzones", group = grpScalp,
+     tooltip = "Spot FX scalping outside the London and New York sessions pays spread into thin liquidity.")
+sessA = input.session("0700-1000", "Killzone 1 (London)", group = grpScalp)
+sessB = input.session("1200-1500", "Killzone 2 (New York)", group = grpScalp)
+sessTz = input.string("GMT", "Killzone timezone", group = grpScalp,
+     options = ["GMT", "GMT-5", "GMT-4", "GMT+1", "GMT+2", "GMT+7", "GMT+8", "America/New_York", "Europe/London", "Asia/Tokyo"])
+scalpSLMult = input.float(0.8, "Scalp ATR stop floor", group = grpScalp,
+     minval = 0.3, step = 0.1)
+scalpRR1 = input.float(1.0, "Scalp TP1 R multiple", group = grpScalp,
+     minval = 0.5, step = 0.25)
+scalpRR2 = input.float(2.0, "Scalp TP2 R multiple", group = grpScalp,
+     minval = 0.5, step = 0.25)
+minTargetPips = input.float(3.0, "Minimum TP1 distance (pips)", group = grpScalp,
+     minval = 0.0, step = 0.5,
+     tooltip = "Rejects setups whose first target is too small to clear the spread. Set to your pair's typical spread x 3.")
+maxHoldBars = input.int(30, "Maximum hold (bars) - time stop", group = grpScalp,
+     minval = 1, maxval = 200,
+     tooltip = "Your stated hold is 1-30 minutes. On a 1m chart 30 bars = 30 minutes. Also sets how far the SL/TP lines extend.")
+signalCooldown = input.int(5, "Minimum bars between signals", group = grpScalp,
+     minval = 0)
+sbsMin = input.int(78, "Strong signal minimum score", group = grpScalp,
+     minval = 50, maxval = 100)
+showSignals = input.bool(true, "Show SBS / SSS signals", group = grpScalp)
+showSignalArrows = input.bool(true, "Show signal arrows", group = grpScalp)
+showSignalLevels = input.bool(true, "Draw SL / TP1 / TP2 lines", group = grpScalp)
+maxSignalDraws = input.int(4, "Signal level sets kept on chart",
+     group = grpScalp, minval = 1, maxval = 12)
+
+// ── Colours & legend ────────────────────────────────────────────────────────
+grpCol = "Colours & Legend"
+showLegend = input.bool(true, "Show colour legend", group = grpCol)
+showScalpMAs = input.bool(true, "Plot fast / mid / slow EMAs", group = grpCol)
+showVwapLine = input.bool(true, "Plot VWAP", group = grpCol)
+cEmaF = input.color(#FFD600, "Fast EMA (9)", group = grpCol)
+cEmaM = input.color(#E040FB, "Mid EMA (21)", group = grpCol)
+cEmaS = input.color(#90A4AE, "Slow EMA (50)", group = grpCol)
+cVwap = input.color(#00E5FF, "VWAP", group = grpCol)
+cBBBand = input.color(#2962FF, "Bollinger upper / lower", group = grpCol)
+cBBMid = input.color(#FF6D00, "Bollinger basis (mid)", group = grpCol)
+cSupport = input.color(#00C853, "Support line", group = grpCol)
+cResist = input.color(#D50000, "Resistance line", group = grpCol)
+cBosUp = input.color(#00E676, "BOS up", group = grpCol)
+cBosDn = input.color(#FF1744, "BOS down", group = grpCol)
+cChochUp = input.color(#76FF03, "CHoCH up", group = grpCol)
+cChochDn = input.color(#FF9100, "CHoCH down", group = grpCol)
 
 grpP1 = "Patterns - Single Candle (01-12)"
 p01 = input.bool(true, "01 Hammer (HAM)", group = grpP1)
@@ -279,6 +344,21 @@ if bearBOSEvent
 
 emaFast = ta.ema(close, 20)
 emaSlow = ta.ema(close, 50)
+// Scalping pair: price pulling back into the 9/21 band inside an established
+// bias is the entry zone. The 20/50 pair stays the trend/regime reference.
+emaF = ta.ema(close, fastLen)
+emaM = ta.ema(close, midLen)
+
+// Killzones. Spot FX outside London/New York is where scalping edge dies.
+inSessA = not na(time(timeframe.period, sessA, sessTz))
+inSessB = not na(time(timeframe.period, sessB, sessTz))
+inKillzone = inSessA or inSessB
+// A session filter is meaningless off an intraday chart, so it stands down
+// there rather than blocking every signal.
+sessionOk = not useSession or not timeframe.isintraday or inKillzone
+
+// Pip size: works for 5-digit and 3-digit (JPY) FX quotes alike.
+pipSize = syminfo.type == "forex" ? syminfo.mintick * 10.0 : syminfo.mintick
 
 upTrendCore = emaFast > emaSlow and emaSlow > emaSlow[trendLb]
 downTrendCore = emaFast < emaSlow and emaSlow < emaSlow[trendLb]
@@ -650,6 +730,109 @@ bearDivActive = not na(bearDivBar) and bar_index - bearDivBar <= divWindow
 rsiBullOk = bullDivActive or rsiVal < rsiOS or (rsiVal > 50 and rsiRising)
 rsiBearOk = bearDivActive or rsiVal > rsiOB or (rsiVal < 50 and rsiFalling)
 
+// ═════════════════════════════ SCALPING ENGINE ══════════════════════════════
+// Direction comes from the bias timeframes only. The chart timeframe times the
+// entry. Nothing here overrides the pattern engine: it adds the filters that
+// separate a tradable 1-15m pullback from noise.
+
+// Bias: HTF 2 and HTF 3 (1H and 1D by default) must agree when strict mode is
+// on. A bias timeframe at or below the chart timeframe is skipped, not failed.
+biasBullStrict = (htf2Valid or htf3Valid) and
+     (not htf2Valid or htf2Bull) and (not htf3Valid or htf3Bull)
+biasBearStrict = (htf2Valid or htf3Valid) and
+     (not htf2Valid or htf2Bear) and (not htf3Valid or htf3Bear)
+biasBull = requireBothHTF ? biasBullStrict : htfBullAlign
+biasBear = requireBothHTF ? biasBearStrict : htfBearAlign
+biasTxt = biasBull ? "BULLISH" : biasBear ? "BEARISH" : "NO BIAS"
+
+// Extension filter: the most expensive scalping mistake is entering after the
+// move has already travelled. Distance from the fast EMA measures that.
+extFromEma = atrV > 0 ? math.abs(close - emaF) / atrV : 0.0
+notExtended = extFromEma <= maxExtATR
+
+// Pullback: price must have traded back into a value zone this bar - the 9/21
+// band, VWAP, a qualified FVG, or a known S/R level.
+emaBandTop = math.max(emaF, emaM)
+emaBandBot = math.min(emaF, emaM)
+pullbackLong = low <= emaBandTop + zoneTol or bullFvgSupport or nearSup or
+     (vwapAvailable and low <= vwapVal + zoneTol)
+pullbackShort = high >= emaBandBot - zoneTol or bearFvgResistance or nearRes or
+     (vwapAvailable and high >= vwapVal - zoneTol)
+
+// Trigger candle: decisive body, close in the leading third of the range, and
+// back on the right side of the fast EMA.
+bullTrigger = bullC and body >= rng * 0.50 and close >= low + rng * 0.66 and
+     close > emaF
+bearTrigger = bearC and body >= rng * 0.50 and close <= high - rng * 0.66 and
+     close < emaF
+
+// Momentum agreement count out of three (MACD, Stochastic, RSI).
+momBullCount = (macdBullConfirm ? 1 : 0) + (stochBullConfirm ? 1 : 0) +
+     ((rsiVal > 45 and rsiRising and rsiVal < maxRsiChase) ? 1 : 0)
+momBearCount = (macdBearConfirm ? 1 : 0) + (stochBearConfirm ? 1 : 0) +
+     ((rsiVal < 55 and rsiFalling and rsiVal > 100.0 - maxRsiChase) ? 1 : 0)
+
+// Risk geometry: stop beyond the 3-bar micro swing plus a buffer, floored on
+// ATR so a single tick of noise cannot produce an unusable stop.
+microLow = ta.lowest(low, 3)
+microHigh = ta.highest(high, 3)
+slFloorMult = scalpMode ? scalpSLMult : atrSLMult
+sigRR1 = scalpMode ? scalpRR1 : rr1
+sigRR2 = scalpMode ? scalpRR2 : rr2
+riskLong = math.max(close - (microLow - atrV * slBufferATR), atrV * slFloorMult)
+riskShort = math.max((microHigh + atrV * slBufferATR) - close, atrV * slFloorMult)
+tgtOkLong = riskLong * sigRR1 >= minTargetPips * pipSize
+tgtOkShort = riskShort * sigRR1 >= minTargetPips * pipSize
+
+// Scalp setup quality, 0-100, independent of the pattern confluence score.
+scalpQuality(int dir) =>
+    bool bull = dir == 1
+    int q = 0
+    q += (bull ? biasBull : biasBear) ? 25 : 0
+    q += sessionOk ? 10 : 0
+    q += (bull ? pullbackLong : pullbackShort) ? 10 : 0
+    q += notExtended ? 10 : 0
+    q += (bull ? bullTrigger : bearTrigger) ? 15 : 0
+    q += 5 * (bull ? momBullCount : momBearCount)
+    q += (bull ? structDir >= 0 : structDir <= 0) ? 10 : 0
+    q += (bull ? tgtOkLong : tgtOkShort) ? 5 : 0
+    q
+
+scalpReasons(int dir) =>
+    bool bull = dir == 1
+    int momN = bull ? momBullCount : momBearCount
+    string s = "WHY THIS SIGNAL\n"
+    s += (bull ? biasBull : biasBear) ?
+         "• Bias: " + timeframe.period + " aligned with " + htfB + " + " + htfC + " ✓\n" :
+         "• Bias: bias timeframes not aligned ✗\n"
+    s += sessionOk ?
+         (inKillzone ? "• Session: inside killzone ✓\n" : "• Session: filter off\n") :
+         "• Session: outside killzone ✗\n"
+    s += (bull ? pullbackLong : pullbackShort) ?
+         "• Entry zone: pullback into EMA " + str.tostring(fastLen) + "/" +
+         str.tostring(midLen) + " band, VWAP, FVG or S/R ✓\n" :
+         "• Entry zone: no pullback, price mid-range ✗\n"
+    s += notExtended ?
+         "• Extension: " + str.tostring(extFromEma, "#.##") + " ATR from fast EMA - not chasing ✓\n" :
+         "• Extension: " + str.tostring(extFromEma, "#.##") + " ATR from fast EMA - too far ✗\n"
+    s += (bull ? bullTrigger : bearTrigger) ?
+         "• Trigger candle: decisive body, close in leading third ✓\n" :
+         "• Trigger candle: no momentum close ✗\n"
+    s += "• Momentum: " + str.tostring(momN) + "/3 (MACD " +
+         ((bull ? macdBullConfirm : macdBearConfirm) ? "✓" : "✗") + ", Stoch " +
+         ((bull ? stochBullConfirm : stochBearConfirm) ? "✓" : "✗") + ", RSI " +
+         str.tostring(rsiVal, "#.#") + ")\n"
+    s += (bull ? structDir >= 0 : structDir <= 0) ?
+         "• Structure: not against the last break ✓\n" :
+         "• Structure: last break is against this trade ✗\n"
+    s += "• Regime: " + regime + " | ADX " +
+         (adxAvailable ? str.tostring(adxVal, "#.#") : "n/a") + " | ATR " +
+         str.tostring(atrPct, "#.##") + "%\n"
+    s += (bull ? tgtOkLong : tgtOkShort) ?
+         "• Target size: TP1 clears the spread filter ✓" :
+         "• Target size: TP1 below the minimum pip filter ✗"
+    s
+
 // ═══════════════════════════ CONFLUENCE ENGINE ══════════════════════════════
 // Family weighting. A family contributes its full weight only when every
 // enabled check inside it passes, so five correlated momentum indicators can
@@ -891,6 +1074,7 @@ type PatternInst
     string bodyTxt
     int confidence
     color colMain
+    int relPct
 
 patternStatus(PatternInst inst) =>
     inst.state == 0 ? "DETECTED - AWAITING CONFIRMATION" :
@@ -939,8 +1123,14 @@ fire(bool patOn, int structN, string tier, string cat, int dir,
     bool structOn = structN == 1 ? structSingle :
          structN == 2 ? structDouble : structTriple
 
+    // Scalp mode opens Must/Important patterns up to the 1-15m charts. Rare and
+    // 4-5 candle formations stay on their own timeframes, where they mean
+    // something: on a 1m chart they are noise.
+    bool inScalpTf = str.contains("," + scalpTfList + ",",
+         "," + timeframe.period + ",")
     bool tfOn = ignoreTf or tfList == "ALL" or
-         str.contains("," + tfList + ",", "," + timeframe.period + ",")
+         str.contains("," + tfList + ",", "," + timeframe.period + ",") or
+         (scalpMode and inScalpTf and tier != "R")
 
     if patOn and catOn and tierOn and structOn and tfOn
         // Risk geometry comes first: the confluence engine needs the risk unit
@@ -1006,7 +1196,7 @@ fire(bool patOn, int structN, string tier, string cat, int dir,
         PatternInst inst = PatternInst.new(
              na, bar_index, pHigh, pLow, dir, dir == 0 ? 3 : 0,
              abbr, pname, bodyTxt, confidence,
-             dir == 1 ? colBull : dir == -1 ? colBear : colNeut)
+             dir == 1 ? colBull : dir == -1 ? colBear : colNeut, relPct)
 
         if not confirmedOnly or dir == 0
             drawPattern(inst)
@@ -1698,6 +1888,157 @@ if confirmed and ladderTopShape and upTrend[5]
          math.min(low, math.min(low[1], math.min(low[2],
          math.min(low[3], math.min(low[4], low[5]))))))
 
+// ═══════════════════════ SBS / SSS SIGNAL ENGINE ═══════════════════════════
+// A "strong" signal is a confluence of four independent things: bias from the
+// higher timeframes, a completed pullback into value, a candlestick trigger
+// from the pattern engine, and momentum agreement. Any one of them alone is
+// not a signal.
+
+// Best pattern that fired on THIS bar, per direction. The array is
+// chronological, so scanning backwards and stopping at the first older entry
+// keeps this cheap.
+int bullPatConf = -1
+int bullPatRel = 0
+string bullPatAbbr = ""
+string bullPatName = ""
+int bearPatConf = -1
+int bearPatRel = 0
+string bearPatAbbr = ""
+string bearPatName = ""
+bool scanDone = false
+if array.size(insts) > 0
+    for i = array.size(insts) - 1 to 0
+        PatternInst pi = array.get(insts, i)
+        if not scanDone
+            if pi.barIdx != bar_index
+                scanDone := true
+            else
+                if pi.dir == 1 and pi.confidence > bullPatConf
+                    bullPatConf := pi.confidence
+                    bullPatRel := pi.relPct
+                    bullPatAbbr := pi.abbr
+                    bullPatName := pi.pname
+                if pi.dir == -1 and pi.confidence > bearPatConf
+                    bearPatConf := pi.confidence
+                    bearPatRel := pi.relPct
+                    bearPatAbbr := pi.abbr
+                    bearPatName := pi.pname
+
+// A pattern trigger is preferred; a clean momentum trigger candle is accepted
+// as a fallback so pure continuation entries are not lost.
+bullEntryTrigger = bullPatConf >= 0 or bullTrigger
+bearEntryTrigger = bearPatConf >= 0 or bearTrigger
+bullRelUsed = bullPatConf >= 0 ? bullPatRel : 65
+bearRelUsed = bearPatConf >= 0 ? bearPatRel : 65
+
+// Final score: pattern/indicator confluence blended with scalp setup quality.
+sbsScoreVal = int(math.round(0.55 * confluenceScore(1, bullRelUsed, riskLong) +
+     0.45 * scalpQuality(1)))
+sssScoreVal = int(math.round(0.55 * confluenceScore(-1, bearRelUsed, riskShort) +
+     0.45 * scalpQuality(-1)))
+
+var int lastSigBar = -1000
+cooldownOk = bar_index - lastSigBar >= signalCooldown
+
+sbsRaw = confirmed and showSignals and biasBull and sessionOk and
+     not (avoidChop and strongChop) and pullbackLong and notExtended and
+     bullEntryTrigger and momBullCount >= 2 and structDir >= 0 and
+     tgtOkLong and rsiVal < maxRsiChase and cooldownOk
+sssRaw = confirmed and showSignals and biasBear and sessionOk and
+     not (avoidChop and strongChop) and pullbackShort and notExtended and
+     bearEntryTrigger and momBearCount >= 2 and structDir <= 0 and
+     tgtOkShort and rsiVal > 100.0 - maxRsiChase and cooldownOk
+
+sbsSignal = sbsRaw and sbsScoreVal >= sbsMin and not sssRaw
+sssSignal = sssRaw and sssScoreVal >= sbsMin and not sbsRaw
+
+// Levels for the signal bar.
+sigEntry = close
+sbsSL = close - riskLong
+sbsTP1 = close + riskLong * sigRR1
+sbsTP2 = close + riskLong * sigRR2
+sssSL = close + riskShort
+sssTP1 = close - riskShort * sigRR1
+sssTP2 = close - riskShort * sigRR2
+
+type Trade
+    line slLine
+    line tp1Line
+    line tp2Line
+    line entryLine
+    label lb
+
+var array<Trade> trades = array.new<Trade>()
+
+signalTooltip(int dir, int score, string abbr, string pname, int relPct, float entry, float sl, float tp1, float tp2) =>
+    string head = (dir == 1 ? "STRONG BUY SIGNAL (SBS)" : "STRONG SELL SIGNAL (SSS)") +
+         "\nSetup score: " + str.tostring(score) + "% / 100\n" + SEP + "\n"
+    string trig = abbr == "" ?
+         "Trigger: momentum continuation candle\n" :
+         "Trigger pattern: " + abbr + " - " + pname + "\n" +
+         "Pattern reference reliability: " + qualityText(relPct) + "\n"
+    string levels = SEP + "\nEntry (this close): " + str.tostring(entry, format.mintick) +
+         "\nStop loss: " + str.tostring(sl, format.mintick) +
+         "  (" + str.tostring(math.abs(entry - sl) / pipSize, "#.#") + " pips)" +
+         "\nTake profit 1 (" + str.tostring(sigRR1) + "R): " + str.tostring(tp1, format.mintick) +
+         "\nTake profit 2 (" + str.tostring(sigRR2) + "R): " + str.tostring(tp2, format.mintick) +
+         "\nTime stop: " + str.tostring(maxHoldBars) + " bars from here\n" + SEP
+    string plan = "\nMANAGEMENT\n" +
+         "• Take partial at TP1, move stop to break-even.\n" +
+         "• Exit at the time stop even if neither level is hit - a scalp that " +
+         "stops moving is a losing scalp.\n" +
+         "• Invalid if price closes beyond the stop level.\n" + SEP +
+         "\nThe score is confluence quality, NOT a win rate. Position size from " +
+         "your own risk per trade."
+    head + trig + scalpReasons(dir) + "\n" + levels + plan
+
+drawSignal(int dir, int score, string abbr, string pname, int relPct, float entry, float sl, float tp1, float tp2) =>
+    color c = dir == 1 ? colBull : colBear
+    label lb = label.new(bar_index, dir == 1 ? low : high,
+         (dir == 1 ? "SBS " : "SSS ") + str.tostring(score) + "%",
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = dir == 1 ? label.style_label_up : label.style_label_down,
+         color = c, textcolor = color.white, size = size.normal,
+         tooltip = signalTooltip(dir, score, abbr, pname, relPct,
+         entry, sl, tp1, tp2))
+    line el = na
+    line sll = na
+    line t1l = na
+    line t2l = na
+    if showSignalLevels
+        int rt = bar_index + maxHoldBars
+        el := line.new(bar_index, entry, rt, entry, xloc = xloc.bar_index,
+             color = color.new(color.gray, 20), style = line.style_solid, width = 1)
+        sll := line.new(bar_index, sl, rt, sl, xloc = xloc.bar_index,
+             color = color.new(cBosDn, 10), style = line.style_dashed, width = 2)
+        t1l := line.new(bar_index, tp1, rt, tp1, xloc = xloc.bar_index,
+             color = color.new(cBosUp, 10), style = line.style_dashed, width = 2)
+        t2l := line.new(bar_index, tp2, rt, tp2, xloc = xloc.bar_index,
+             color = color.new(cBosUp, 45), style = line.style_dotted, width = 2)
+    array.push(trades, Trade.new(sll, t1l, t2l, el, lb))
+    if array.size(trades) > maxSignalDraws
+        Trade old = array.shift(trades)
+        line.delete(old.slLine)
+        line.delete(old.tp1Line)
+        line.delete(old.tp2Line)
+        line.delete(old.entryLine)
+        label.delete(old.lb)
+
+if sbsSignal
+    lastSigBar := bar_index
+    drawSignal(1, sbsScoreVal, bullPatAbbr, bullPatName, bullRelUsed,
+         sigEntry, sbsSL, sbsTP1, sbsTP2)
+
+if sssSignal
+    lastSigBar := bar_index
+    drawSignal(-1, sssScoreVal, bearPatAbbr, bearPatName, bearRelUsed,
+         sigEntry, sssSL, sssTP1, sssTP2)
+
+plotshape(showSignalArrows and sbsSignal, "SBS arrow", shape.triangleup,
+     location.belowbar, color = colBull, size = size.small)
+plotshape(showSignalArrows and sssSignal, "SSS arrow", shape.triangledown,
+     location.abovebar, color = colBear, size = size.small)
+
 // ═════════════════════════════ ALERT CONDITIONS ═════════════════════════════
 
 int latestConfidence = array.size(insts) > 0 ?
@@ -1723,6 +2064,25 @@ alertcondition(bullBreakAlert, "Bullish BOS/CHOCH",
      "CandleMaster Pro: bullish structure break confirmed.")
 alertcondition(bearBreakAlert, "Bearish BOS/CHOCH",
      "CandleMaster Pro: bearish structure break confirmed.")
+alertcondition(sbsSignal, "SBS - Strong Buy Signal",
+     "SBS strong buy: HTF bias + pullback + trigger + momentum aligned.")
+alertcondition(sssSignal, "SSS - Strong Sell Signal",
+     "SSS strong sell: HTF bias + pullback + trigger + momentum aligned.")
+
+if sbsSignal and fireAlerts
+    alert("SBS BUY " + syminfo.ticker + " " + timeframe.period + " · score " +
+         str.tostring(sbsScoreVal) + "% · entry " +
+         str.tostring(sigEntry, format.mintick) + " · SL " +
+         str.tostring(sbsSL, format.mintick) + " · TP1 " +
+         str.tostring(sbsTP1, format.mintick) + " · TP2 " +
+         str.tostring(sbsTP2, format.mintick), alert.freq_once_per_bar_close)
+if sssSignal and fireAlerts
+    alert("SSS SELL " + syminfo.ticker + " " + timeframe.period + " · score " +
+         str.tostring(sssScoreVal) + "% · entry " +
+         str.tostring(sigEntry, format.mintick) + " · SL " +
+         str.tostring(sssSL, format.mintick) + " · TP1 " +
+         str.tostring(sssTP1, format.mintick) + " · TP2 " +
+         str.tostring(sssTP2, format.mintick), alert.freq_once_per_bar_close)
 
 // ═════════════════════════ DISPLAY / STRUCTURE OBJECTS ═════════════════════
 
@@ -1733,24 +2093,30 @@ var label lastStructureLabel = na
 // Kept as two flat blocks rather than one nested block: Pine limits how large a
 // single if body may be (CE10205).
 drawStructure = confirmed and showStructure
-bosTipBull = "Bullish Break of Structure\nConfirmed close above the latest confirmed swing high."
-bosTipBear = "Bearish Break of Structure\nConfirmed close below the latest confirmed swing low."
-chochTipBull = "Change of Character\nConfirmed bullish break after bearish structure.\nStructure context, not a guaranteed reversal."
-chochTipBear = "Change of Character\nConfirmed bearish break after bullish structure.\nStructure context, not a guaranteed reversal."
+// BOS and CHoCH are visually separated on purpose: BOS uses a solid line and a
+// plain arrow, CHoCH uses a dashed line, its own colour and a "CHoCH" word,
+// because they mean different things. BOS = the existing trend continued
+// through a swing. CHoCH = the trend flipped: the first break in the new
+// direction after the opposite structure.
+bosTipBull = "BOS ▲  Bullish Break of Structure\nConfirmed close above the latest confirmed swing high.\nThe up-trend extended. Continuation context."
+bosTipBear = "BOS ▼  Bearish Break of Structure\nConfirmed close below the latest confirmed swing low.\nThe down-trend extended. Continuation context."
+chochTipBull = "CHoCH ▲  Change of Character (bullish)\nFirst confirmed bullish break AFTER bearish structure.\nThis is the trend-flip warning, not a continuation.\nStructure context, not a guaranteed reversal."
+chochTipBear = "CHoCH ▼  Change of Character (bearish)\nFirst confirmed bearish break AFTER bullish structure.\nThis is the trend-flip warning, not a continuation.\nStructure context, not a guaranteed reversal."
 
 if drawStructure and bullBOSEvent
     line.delete(lastBullBreakLine)
     label.delete(lastStructureLabel)
     lastBullBreakLine := line.new(bar_index - 1, brokenSwingHigh,
          bar_index, brokenSwingHigh, xloc = xloc.bar_index,
-         extend = extend.right, color = color.new(colBull, 20),
-         style = line.style_dashed, width = 2)
+         extend = extend.right,
+         color = color.new(bullCHOCH ? cChochUp : cBosUp, 15),
+         style = bullCHOCH ? line.style_dashed : line.style_solid, width = 2)
     lastStructureLabel := label.new(bar_index, brokenSwingHigh,
-         bullCHOCH ? "CHOCH+" : "BOS+",
+         bullCHOCH ? "CHoCH ▲" : "BOS ▲",
          xloc = xloc.bar_index, yloc = yloc.price,
          style = label.style_label_down,
-         color = color.new(colBull, bullCHOCH ? 10 : 15),
-         textcolor = color.white, size = size.tiny,
+         color = color.new(bullCHOCH ? cChochUp : cBosUp, 10),
+         textcolor = color.black, size = size.tiny,
          tooltip = bullCHOCH ? chochTipBull : bosTipBull)
 
 if drawStructure and bearBOSEvent
@@ -1758,48 +2124,76 @@ if drawStructure and bearBOSEvent
     label.delete(lastStructureLabel)
     lastBearBreakLine := line.new(bar_index - 1, brokenSwingLow,
          bar_index, brokenSwingLow, xloc = xloc.bar_index,
-         extend = extend.right, color = color.new(colBear, 20),
-         style = line.style_dashed, width = 2)
+         extend = extend.right,
+         color = color.new(bearCHOCH ? cChochDn : cBosDn, 15),
+         style = bearCHOCH ? line.style_dashed : line.style_solid, width = 2)
     lastStructureLabel := label.new(bar_index, brokenSwingLow,
-         bearCHOCH ? "CHOCH-" : "BOS-",
+         bearCHOCH ? "CHoCH ▼" : "BOS ▼",
          xloc = xloc.bar_index, yloc = yloc.price,
          style = label.style_label_up,
-         color = color.new(colBear, bearCHOCH ? 10 : 15),
+         color = color.new(bearCHOCH ? cChochDn : cBosDn, 10),
          textcolor = color.white, size = size.tiny,
          tooltip = bearCHOCH ? chochTipBear : bosTipBear)
 
-plot(showBB ? bbUpper : na, "BB Upper", color = color.new(color.gray, 70))
-plot(showBB ? bbBasis : na, "BB Basis", color = color.new(color.gray, 55))
-plot(showBB ? bbLower : na, "BB Lower", color = color.new(color.gray, 70))
+// Every line has its own colour AND its own style, so it is identifiable both
+// on the chart and in the TradingView status line. Names match the legend.
+bbU = plot(showBB ? bbUpper : na, "① BB Upper — blue",
+     color = color.new(cBBBand, 20), linewidth = 1)
+bbL = plot(showBB ? bbLower : na, "① BB Lower — blue",
+     color = color.new(cBBBand, 20), linewidth = 1)
+fill(bbU, bbL, color = color.new(cBBBand, 94), title = "BB channel fill")
+plot(showBB ? bbBasis : na, "② BB Basis — orange dots",
+     color = color.new(cBBMid, 10), linewidth = 1, style = plot.style_circles)
 
-plot(showSR ? recentSupport : na, "Recent support",
-     color = color.new(colBull, 65), style = plot.style_linebr)
-plot(showSR ? recentResistance : na, "Recent resistance",
-     color = color.new(colBear, 65), style = plot.style_linebr)
+plot(showScalpMAs ? emaF : na, "③ Fast EMA — yellow",
+     color = cEmaF, linewidth = 2)
+plot(showScalpMAs ? emaM : na, "④ Mid EMA — magenta",
+     color = cEmaM, linewidth = 2)
+plot(showScalpMAs ? emaSlow : na, "⑤ Slow EMA 50 — grey",
+     color = cEmaS, linewidth = 2)
+plot(showVwapLine and vwapAvailable ? vwapVal : na, "⑥ VWAP — cyan thick",
+     color = cVwap, linewidth = 3)
+
+plot(showSR ? recentSupport : na, "⑦ Support — green steps",
+     color = color.new(cSupport, 25), style = plot.style_stepline, linewidth = 2)
+plot(showSR ? recentResistance : na, "⑧ Resistance — red steps",
+     color = color.new(cResist, 25), style = plot.style_stepline, linewidth = 2)
 
 plot(showSD and demandZone ? demandLow : na, "Demand low",
-     color = color.new(colBull, 80), style = plot.style_linebr)
+     color = color.new(cSupport, 80), style = plot.style_linebr)
 plot(showSD and demandZone ? demandHigh : na, "Demand high",
-     color = color.new(colBull, 80), style = plot.style_linebr)
+     color = color.new(cSupport, 80), style = plot.style_linebr)
 plot(showSD and supplyZone ? supplyLow : na, "Supply low",
-     color = color.new(colBear, 80), style = plot.style_linebr)
+     color = color.new(cResist, 80), style = plot.style_linebr)
 plot(showSD and supplyZone ? supplyHigh : na, "Supply high",
-     color = color.new(colBear, 80), style = plot.style_linebr)
+     color = color.new(cResist, 80), style = plot.style_linebr)
 
 // ═════════════════════════════════ DASHBOARD ════════════════════════════════
 // Pine exposes no chart click events, so per-signal detail lives in each
 // label's tooltip. The panel shows the live confluence read for both sides.
 
-var table dash = table.new(position.top_right, 2, 14, border_width = 1)
+var table dash = table.new(position.top_right, 2, 18, border_width = 1)
 
 // Panel values are resolved at global scope to keep the if body short.
 liveScore = math.max(liveBullScore, liveBearScore)
 dashSignal = strongChop and avoidChop ? "CHOP" :
-     liveBullScore >= minTradeScore and liveBullScore > liveBearScore ? "BUY BIAS" :
-     liveBearScore >= minTradeScore and liveBearScore > liveBullScore ? "SELL BIAS" : "WATCH"
+     biasBull and liveBullScore >= minTradeScore ? "BUY BIAS" :
+     biasBear and liveBearScore >= minTradeScore ? "SELL BIAS" :
+     biasBull ? "BULL - WAIT PULLBACK" :
+     biasBear ? "BEAR - WAIT PULLBACK" : "NO BIAS"
+scalpStateTxt = not sessionOk ? "OUT OF KILLZONE" :
+     not notExtended ? "EXTENDED - do not chase" :
+     biasBull and pullbackLong ? "LONG PULLBACK READY" :
+     biasBear and pullbackShort ? "SHORT PULLBACK READY" :
+     biasBull or biasBear ? "IN TREND - no pullback yet" : "STAND DOWN"
+sbsSssTxt = "SBS " + str.tostring(sbsScoreVal) + "% / SSS " +
+     str.tostring(sssScoreVal) + "%"
+killzoneTxt = not useSession ? "filter off" :
+     inSessA ? "LONDON ✓" : inSessB ? "NEW YORK ✓" : "closed ✗"
 dashColor = dashSignal == "BUY BIAS" ? colBull :
      dashSignal == "SELL BIAS" ? colBear :
-     dashSignal == "CHOP" ? colNeut : color.orange
+     dashSignal == "CHOP" or dashSignal == "NO BIAS" ? colNeut : color.orange
+biasColor = biasBull ? colBull : biasBear ? colBear : colNeut
 structureState = bullCHOCH ? "CHOCH+" : bearCHOCH ? "CHOCH-" :
      bullBOSEvent ? "BOS+" : bearBOSEvent ? "BOS-" :
      structDir == 1 ? "BULL" : structDir == -1 ? "BEAR" : "NONE"
@@ -1846,6 +2240,60 @@ if barstate.islast and showPanel
     table.cell(dash, 0, 13, "ATR", text_color = color.white)
     table.cell(dash, 1, 13, str.tostring(atrPct, "#.###") + "%",
          text_color = color.white)
+    table.cell(dash, 0, 14, "Scalp bias", text_color = color.white)
+    table.cell(dash, 1, 14, biasTxt + " (" + htfB + "+" + htfC + ")",
+         text_color = color.white, bgcolor = color.new(biasColor, 55))
+    table.cell(dash, 0, 15, "Scalp state", text_color = color.white)
+    table.cell(dash, 1, 15, scalpStateTxt, text_color = color.white)
+    table.cell(dash, 0, 16, "Killzone", text_color = color.white)
+    table.cell(dash, 1, 16, killzoneTxt, text_color = color.white)
+    table.cell(dash, 0, 17, "SBS / SSS", text_color = color.white)
+    table.cell(dash, 1, 17, sbsSssTxt, text_color = color.white)
+
+// ═════════════════════════════════ LEGEND ═══════════════════════════════════
+// A colour swatch per drawn object. RSI / MACD / Stochastic / ADX are
+// oscillators and cannot be plotted on a price scale meaningfully, so they are
+// read as numbers in the panel above - the legend says so explicitly.
+
+var table legend = table.new(position.bottom_right, 2, 14, border_width = 1)
+
+legendRow(int row, string name, color swatch, string note) =>
+    table.cell(legend, 0, row, "", bgcolor = swatch, width = 1)
+    table.cell(legend, 1, row, name, text_color = color.white,
+         text_size = size.tiny, text_halign = text.align_left, tooltip = note)
+
+if barstate.islast and showLegend
+    table.cell(legend, 0, 0, "KEY", text_color = color.white,
+         bgcolor = color.new(color.black, 10), text_size = size.tiny)
+    table.cell(legend, 1, 0, "what each line is", text_color = color.white,
+         text_size = size.tiny)
+    legendRow(1, "① Bollinger upper/lower", cBBBand,
+         "Volatility envelope, " + str.tostring(bbLen) + " period, " +
+         str.tostring(bbMult) + " deviations. Thin blue lines with a faint fill.")
+    legendRow(2, "② Bollinger basis", cBBMid,
+         "The Bollinger middle band (SMA). Drawn as orange dots so it is never confused with an EMA.")
+    legendRow(3, "③ Fast EMA " + str.tostring(fastLen), cEmaF,
+         "Scalp entry trigger. Pullbacks to this line inside the HTF bias are the entry zone.")
+    legendRow(4, "④ Mid EMA " + str.tostring(midLen), cEmaM,
+         "The other side of the pullback band. Price between ③ and ④ is 'in value'.")
+    legendRow(5, "⑤ Slow EMA 50", cEmaS,
+         "Chart-timeframe trend reference, paired with EMA 20 for the trend gate.")
+    legendRow(6, "⑥ VWAP", cVwap,
+         "Session volume weighted average price, intraday only. The institutional intraday fair-value line.")
+    legendRow(7, "⑦ Support", cSupport,
+         "Lowest low of the last " + str.tostring(srLookback) + " bars, stepped green line.")
+    legendRow(8, "⑧ Resistance", cResist,
+         "Highest high of the last " + str.tostring(srLookback) + " bars, stepped red line.")
+    legendRow(9, "BOS ▲ / ▼ (solid)", cBosUp,
+         "Break of Structure: the existing trend pushed through a confirmed swing. Continuation context. Solid line.")
+    legendRow(10, "CHoCH ▲ / ▼ (dashed)", cChochUp,
+         "Change of Character: the FIRST break in the opposite direction after the previous structure. Trend-flip warning. Dashed line, different colour.")
+    legendRow(11, "FVG zones (boxes)", color.new(color.teal, 40),
+         "Fair Value Gaps: teal box = bullish imbalance below price, red box = bearish imbalance above. Only quality-filtered gaps are drawn.")
+    legendRow(12, "SBS ▲ / SSS ▼", colBull,
+         "Strong Buy / Strong Sell signal. Hover the label for the full reason, score, entry, stop and targets. Dashed red line = stop, dashed green = TP1, dotted green = TP2.")
+    legendRow(13, "RSI / MACD / Stoch / ADX", color.new(color.gray, 30),
+         "These are oscillators - they have no meaningful place on a price scale, so they are shown as live numbers in the panel at the top right instead of as chart lines. Add TradingView's own RSI/MACD panes below the chart if you want the curves.")
 
 // ═════════════════════════ PATTERN LIFECYCLE UPDATES ═══════════════════════
 // UDT instances are references, so mutating a field updates the stored object.
