@@ -29,7 +29,7 @@
 //      The dashboard intentionally reflects the live, still-forming bar.
 // ═════════════════════════════════════════════════════════════════════════════
 
-indicator("Candlestick Master Pro", "CandleMasterPro", overlay = true,
+indicator("Candlestick Master Pro", "CandlePro", overlay = true,
      max_labels_count = 500, max_lines_count = 250, max_boxes_count = 200)
 
 // ═════════════════════════════════ INPUTS ═══════════════════════════════════
@@ -899,6 +899,15 @@ patternStatus(PatternInst inst) =>
      inst.state == 3 ? "NEUTRAL - INFORMATIONAL" :
      "EXPIRED - no confirmation in window"
 
+// Trade-readiness suffix appended to a tooltip once the pattern resolves.
+readinessText(int st, int conf, int dir) =>
+    string grade = conf >= strongScore ? "HIGH-CONFLUENCE " :
+         conf >= goodScore ? "GOOD-CONFLUENCE " : "LOW-CONFLUENCE "
+    st == 1 ? "\n\nTrade readiness: CONFIRMED " + grade +
+     (dir == 1 ? "BULLISH BIAS." : "BEARISH BIAS.") :
+     st == 2 ? "\n\nTrade readiness: FAILED - invalidation level breached." :
+     st == 4 ? "\n\nTrade readiness: EXPIRED - no breakout inside the window." : ""
+
 drawPattern(PatternInst inst) =>
     bool isBear = inst.dir == -1
     inst.lb := label.new(
@@ -1242,451 +1251,452 @@ ladderTopShape =
 
 // ═════════════════════════════ DETECTION / FIRE ═════════════════════════════
 
-if barstate.isconfirmed
+confirmed = barstate.isconfirmed
 
-    // 01 Hammer
-    if hammerShape and downTrend[1]
-        fire(p01, 1, "M", "BR", 1, "60,240,1D", "HAM", "Hammer", 72,
-             "Trend: Downtrend ✓",
-             "Small body near the top of the range with a lower shadow at least 2x the body. " +
-             "The rejection only matters after a decline and near support.",
-             "SL: below the hammer low | TP: nearest resistance / prior swing high",
-             "H1 · H4 · D1", high, low)
 
-    // 02 Hanging Man
-    if hammerShape and upTrend[1]
-        fire(p02, 1, "I", "SR", -1, "60,240,1D", "HGM", "Hanging Man", 62,
-             "Trend: Uptrend ✓",
-             "Hammer anatomy after an advance. The long lower shadow shows sellers " +
-             "were able to push price down sharply inside the session.",
-             "SL: above the pattern high | TP: nearest support / swing low",
-             "H1 · H4 · D1", high, low)
+// 01 Hammer
+if confirmed and hammerShape and downTrend[1]
+    fire(p01, 1, "M", "BR", 1, "60,240,1D", "HAM", "Hammer", 72,
+         "Trend: Downtrend ✓",
+         "Small body near the top of the range with a lower shadow at least 2x the body. " +
+         "The rejection only matters after a decline and near support.",
+         "SL: below the hammer low | TP: nearest resistance / prior swing high",
+         "H1 · H4 · D1", high, low)
 
-    // 03 Inverted Hammer
-    if invHamShape and downTrend[1]
-        fire(p03, 1, "M", "BR", 1, "60,240,1D", "IH", "Inverted Hammer", 65,
-             "Trend: Downtrend ✓",
-             "Small body near the bottom with a long upper shadow after a decline. " +
-             "The upward attempt needs bullish follow-through to matter.",
-             "SL: below the pattern low | TP: nearest resistance / swing high",
-             "H1 · H4 · D1", high, low)
+// 02 Hanging Man
+if confirmed and hammerShape and upTrend[1]
+    fire(p02, 1, "I", "SR", -1, "60,240,1D", "HGM", "Hanging Man", 62,
+         "Trend: Uptrend ✓",
+         "Hammer anatomy after an advance. The long lower shadow shows sellers " +
+         "were able to push price down sharply inside the session.",
+         "SL: above the pattern high | TP: nearest support / swing low",
+         "H1 · H4 · D1", high, low)
 
-    // 04 Shooting Star
-    if invHamShape and upTrend[1]
-        fire(p04, 1, "M", "SR", -1, "60,240,1D", "SST", "Shooting Star", 68,
-             "Trend: Uptrend ✓",
-             "Inverted-hammer anatomy at the top of an advance. The long upper " +
-             "shadow is rejection of higher prices.",
-             "SL: above the pattern high | TP: nearest support / swing low",
-             "H1 · H4 · D1", high, low)
+// 03 Inverted Hammer
+if confirmed and invHamShape and downTrend[1]
+    fire(p03, 1, "M", "BR", 1, "60,240,1D", "IH", "Inverted Hammer", 65,
+         "Trend: Downtrend ✓",
+         "Small body near the bottom with a long upper shadow after a decline. " +
+         "The upward attempt needs bullish follow-through to matter.",
+         "SL: below the pattern low | TP: nearest resistance / swing high",
+         "H1 · H4 · D1", high, low)
 
-    // 05 Bullish Marubozu
-    if maruBullShape
-        fire(p05, 1, "M", "CT", 1, "15,60,1D", "BUM", "Bullish Marubozu", 74,
-             "Context: Momentum candle",
-             "Large bullish body with effectively no shadows: one-sided buying from " +
-             "open to close. Location decides whether continuation is likely.",
-             "SL: below the candle low (or body midpoint) | TP: next resistance / measured move",
-             "M15 · H1 · D1", high, low)
+// 04 Shooting Star
+if confirmed and invHamShape and upTrend[1]
+    fire(p04, 1, "M", "SR", -1, "60,240,1D", "SST", "Shooting Star", 68,
+         "Trend: Uptrend ✓",
+         "Inverted-hammer anatomy at the top of an advance. The long upper " +
+         "shadow is rejection of higher prices.",
+         "SL: above the pattern high | TP: nearest support / swing low",
+         "H1 · H4 · D1", high, low)
 
-    // 06 Bearish Marubozu
-    if maruBearShape
-        fire(p06, 1, "M", "CT", -1, "15,60,1D", "BEM", "Bearish Marubozu", 74,
-             "Context: Momentum candle",
-             "Large bearish body with effectively no shadows: unopposed selling from " +
-             "open to close.",
-             "SL: above the candle high (or body midpoint) | TP: next support / measured move",
-             "M15 · H1 · D1", high, low)
+// 05 Bullish Marubozu
+if confirmed and maruBullShape
+    fire(p05, 1, "M", "CT", 1, "15,60,1D", "BUM", "Bullish Marubozu", 74,
+         "Context: Momentum candle",
+         "Large bullish body with effectively no shadows: one-sided buying from " +
+         "open to close. Location decides whether continuation is likely.",
+         "SL: below the candle low (or body midpoint) | TP: next resistance / measured move",
+         "M15 · H1 · D1", high, low)
 
-    // 07 Spinning Top
-    if spinTopShape
-        fire(p07, 1, "I", "IN", 0, "ALL", "SPT", "Spinning Top", 55,
-             "Context: Indecision",
-             "Small real body with balanced upper and lower shadows: a draw, not an " +
-             "automatic reversal.",
-             "SL/TP: trade the eventual range breakout using nearby structure",
-             "All TFs", high, low)
+// 06 Bearish Marubozu
+if confirmed and maruBearShape
+    fire(p06, 1, "M", "CT", -1, "15,60,1D", "BEM", "Bearish Marubozu", 74,
+         "Context: Momentum candle",
+         "Large bearish body with effectively no shadows: unopposed selling from " +
+         "open to close.",
+         "SL: above the candle high (or body midpoint) | TP: next support / measured move",
+         "M15 · H1 · D1", high, low)
 
-    // 08 Standard Doji
-    if plainDoji and minRange and not haramiCrossShape
-        fire(p08, 1, "I", "IN", 0, "60,240,1D", "DOJ", "Standard Doji", 58,
-             "Context: Indecision",
-             "Open and close are effectively equal. After an extended move it warns of " +
-             "momentum loss, but it is never a standalone reversal.",
-             "SL/TP: wait for a directional break of the doji range",
-             "H1 · H4 · D1", high, low)
+// 07 Spinning Top
+if confirmed and spinTopShape
+    fire(p07, 1, "I", "IN", 0, "ALL", "SPT", "Spinning Top", 55,
+         "Context: Indecision",
+         "Small real body with balanced upper and lower shadows: a draw, not an " +
+         "automatic reversal.",
+         "SL/TP: trade the eventual range breakout using nearby structure",
+         "All TFs", high, low)
 
-    // 09 Long-Legged Doji
-    if longLegShape
-        fire(p09, 1, "I", "IN", 0, "240,1D", "LLD", "Long-Legged Doji", 60,
-             "Context: Volatility / indecision",
-             "Open and close are near each other despite a wide two-sided range: strong " +
-             "rejection in both directions.",
-             "SL/TP: use the breakout side and project the doji range",
-             "H4 · D1", high, low)
+// 08 Standard Doji
+if confirmed and plainDoji and minRange and not haramiCrossShape
+    fire(p08, 1, "I", "IN", 0, "60,240,1D", "DOJ", "Standard Doji", 58,
+         "Context: Indecision",
+         "Open and close are effectively equal. After an extended move it warns of " +
+         "momentum loss, but it is never a standalone reversal.",
+         "SL/TP: wait for a directional break of the doji range",
+         "H1 · H4 · D1", high, low)
 
-    // 10 Dragonfly Doji
-    if dragonShape and downTrend[1]
-        fire(p10, 1, "I", "BR", 1, "60,240,1D", "DFD", "Dragonfly Doji", 66,
-             "Trend: Downtrend ✓",
-             "Open, close and high cluster near the high while a long lower shadow " +
-             "shows strong rejection of lower prices.",
-             "SL: below the lower shadow | TP: nearest resistance",
-             "H1 · H4 · D1", high, low)
+// 09 Long-Legged Doji
+if confirmed and longLegShape
+    fire(p09, 1, "I", "IN", 0, "240,1D", "LLD", "Long-Legged Doji", 60,
+         "Context: Volatility / indecision",
+         "Open and close are near each other despite a wide two-sided range: strong " +
+         "rejection in both directions.",
+         "SL/TP: use the breakout side and project the doji range",
+         "H4 · D1", high, low)
 
-    // 11 Gravestone Doji
-    if graveShape and upTrend[1]
-        fire(p11, 1, "I", "SR", -1, "60,240,1D", "GSD", "Gravestone Doji", 66,
-             "Trend: Uptrend ✓",
-             "Open, close and low cluster near the low while a long upper shadow " +
-             "shows rejection of higher prices.",
-             "SL: above the upper shadow | TP: nearest support",
-             "H1 · H4 · D1", high, low)
+// 10 Dragonfly Doji
+if confirmed and dragonShape and downTrend[1]
+    fire(p10, 1, "I", "BR", 1, "60,240,1D", "DFD", "Dragonfly Doji", 66,
+         "Trend: Downtrend ✓",
+         "Open, close and high cluster near the high while a long lower shadow " +
+         "shows strong rejection of lower prices.",
+         "SL: below the lower shadow | TP: nearest resistance",
+         "H1 · H4 · D1", high, low)
 
-    // 12 Four Price Doji
-    if fourPriceShape
-        fire(p12, 1, "R", "IN", 0, "1D,1W", "FPD", "Four Price Doji", 50,
-             "Context: Extremely narrow / inactive bar",
-             "Open, high, low and close are effectively identical: a market-condition " +
-             "marker (illiquidity, pre-news vacuum), not a reversal signal.",
-             "SL/TP: none from the pattern; wait for directional expansion",
-             "D1 · W1", high, low)
+// 11 Gravestone Doji
+if confirmed and graveShape and upTrend[1]
+    fire(p11, 1, "I", "SR", -1, "60,240,1D", "GSD", "Gravestone Doji", 66,
+         "Trend: Uptrend ✓",
+         "Open, close and low cluster near the low while a long upper shadow " +
+         "shows rejection of higher prices.",
+         "SL: above the upper shadow | TP: nearest support",
+         "H1 · H4 · D1", high, low)
 
-    // 13 Bullish Engulfing
-    if becShape and downTrend[2]
-        fire(p13, 2, "M", "BR", 1, "60,240,1D", "BEC", "Bullish Engulfing", 78,
-             "Trend: Downtrend ✓",
-             "The bullish real body fully engulfs the prior bearish real body. The " +
-             "definition is body based; shadows may exceed it.",
-             "SL: below the engulfing low | TP: nearest resistance / swing high",
-             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 12 Four Price Doji
+if confirmed and fourPriceShape
+    fire(p12, 1, "R", "IN", 0, "1D,1W", "FPD", "Four Price Doji", 50,
+         "Context: Extremely narrow / inactive bar",
+         "Open, high, low and close are effectively identical: a market-condition " +
+         "marker (illiquidity, pre-news vacuum), not a reversal signal.",
+         "SL/TP: none from the pattern; wait for directional expansion",
+         "D1 · W1", high, low)
 
-    // 14 Bearish Engulfing
-    if breShape and upTrend[2]
-        fire(p14, 2, "M", "SR", -1, "60,240,1D", "BRE", "Bearish Engulfing", 78,
-             "Trend: Uptrend ✓",
-             "The bearish real body fully engulfs the prior bullish real body: an " +
-             "immediate transfer of control to sellers.",
-             "SL: above the engulfing high | TP: nearest support / swing low",
-             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 13 Bullish Engulfing
+if confirmed and becShape and downTrend[2]
+    fire(p13, 2, "M", "BR", 1, "60,240,1D", "BEC", "Bullish Engulfing", 78,
+         "Trend: Downtrend ✓",
+         "The bullish real body fully engulfs the prior bearish real body. The " +
+         "definition is body based; shadows may exceed it.",
+         "SL: below the engulfing low | TP: nearest resistance / swing high",
+         "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 15 Bullish Harami
-    if bullHaramiShape and downTrend[2]
-        fire(p15, 2, "I", "BR", 1, "240,1D", "BUH", "Bullish Harami", 64,
-             "Trend: Downtrend ✓",
-             "A small bullish body sits completely inside the preceding large bearish " +
-             "body: selling pressure suddenly losing steam.",
-             "SL: below candle 1 low | TP: nearest resistance / candle 1 body top",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 14 Bearish Engulfing
+if confirmed and breShape and upTrend[2]
+    fire(p14, 2, "M", "SR", -1, "60,240,1D", "BRE", "Bearish Engulfing", 78,
+         "Trend: Uptrend ✓",
+         "The bearish real body fully engulfs the prior bullish real body: an " +
+         "immediate transfer of control to sellers.",
+         "SL: above the engulfing high | TP: nearest support / swing low",
+         "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 16 Bearish Harami
-    if bearHaramiShape and upTrend[2]
-        fire(p16, 2, "I", "SR", -1, "240,1D", "BEH", "Bearish Harami", 64,
-             "Trend: Uptrend ✓",
-             "A small bearish body sits completely inside the preceding large bullish " +
-             "body: buyers losing momentum.",
-             "SL: above candle 1 high | TP: nearest support / candle 1 body bottom",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 15 Bullish Harami
+if confirmed and bullHaramiShape and downTrend[2]
+    fire(p15, 2, "I", "BR", 1, "240,1D", "BUH", "Bullish Harami", 64,
+         "Trend: Downtrend ✓",
+         "A small bullish body sits completely inside the preceding large bearish " +
+         "body: selling pressure suddenly losing steam.",
+         "SL: below candle 1 low | TP: nearest resistance / candle 1 body top",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 17 Harami Cross
-    if haramiCrossShape and (upTrend[2] or downTrend[2])
-        fire(p17, 2, "I", "IN", 0, "240,1D", "HC", "Harami Cross", 66,
-             upTrend[2] ? "Trend: Uptrend ✓" : "Trend: Downtrend ✓",
-             "A doji contained inside the previous long real body: total doubt right " +
-             "after a conviction candle. It needs a directional break.",
-             "SL/TP: wait for the break of the pattern range",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 16 Bearish Harami
+if confirmed and bearHaramiShape and upTrend[2]
+    fire(p16, 2, "I", "SR", -1, "240,1D", "BEH", "Bearish Harami", 64,
+         "Trend: Uptrend ✓",
+         "A small bearish body sits completely inside the preceding large bullish " +
+         "body: buyers losing momentum.",
+         "SL: above candle 1 high | TP: nearest support / candle 1 body bottom",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 18 Piercing Line
-    if piercingShape and downTrend[2]
-        fire(p18, 2, "M", "BR", 1, "240,1D", "PL", "Piercing Line", 70,
-             "Trend: Downtrend ✓",
-             "A bearish candle followed by a bullish candle that opens below the prior " +
-             "close and closes back above the midpoint of the prior body.",
-             "SL: below candle 2 low | TP: nearest resistance",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 17 Harami Cross
+if confirmed and haramiCrossShape and (upTrend[2] or downTrend[2])
+    fire(p17, 2, "I", "IN", 0, "240,1D", "HC", "Harami Cross", 66,
+         upTrend[2] ? "Trend: Uptrend ✓" : "Trend: Downtrend ✓",
+         "A doji contained inside the previous long real body: total doubt right " +
+         "after a conviction candle. It needs a directional break.",
+         "SL/TP: wait for the break of the pattern range",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 19 Dark Cloud Cover
-    if darkCloudShape and upTrend[2]
-        fire(p19, 2, "M", "SR", -1, "240,1D", "DCC", "Dark Cloud Cover", 70,
-             "Trend: Uptrend ✓",
-             "A bullish candle followed by a bearish candle that opens above the prior " +
-             "close and closes below the prior body's midpoint.",
-             "SL: above candle 2 high | TP: nearest support",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 18 Piercing Line
+if confirmed and piercingShape and downTrend[2]
+    fire(p18, 2, "M", "BR", 1, "240,1D", "PL", "Piercing Line", 70,
+         "Trend: Downtrend ✓",
+         "A bearish candle followed by a bullish candle that opens below the prior " +
+         "close and closes back above the midpoint of the prior body.",
+         "SL: below candle 2 low | TP: nearest resistance",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 20 Tweezer Bottom
-    if tweezerBottomShape and downTrend[2]
-        fire(p20, 2, "I", "BR", 1, "60,240,1D", "TWB", "Tweezer Bottom", 67,
-             "Trend: Downtrend ✓",
-             "A bearish candle then a bullish candle sharing the same low. Two " +
-             "rejections from one level means real demand defending it.",
-             "SL: below the twin lows | TP: nearest resistance / swing high",
-             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 19 Dark Cloud Cover
+if confirmed and darkCloudShape and upTrend[2]
+    fire(p19, 2, "M", "SR", -1, "240,1D", "DCC", "Dark Cloud Cover", 70,
+         "Trend: Uptrend ✓",
+         "A bullish candle followed by a bearish candle that opens above the prior " +
+         "close and closes below the prior body's midpoint.",
+         "SL: above candle 2 high | TP: nearest support",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 21 Tweezer Top
-    if tweezerTopShape and upTrend[2]
-        fire(p21, 2, "I", "SR", -1, "60,240,1D", "TWT", "Tweezer Top", 67,
-             "Trend: Uptrend ✓",
-             "A bullish candle then a bearish candle sharing the same high: real supply " +
-             "capping the advance.",
-             "SL: above the twin highs | TP: nearest support / swing low",
-             "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 20 Tweezer Bottom
+if confirmed and tweezerBottomShape and downTrend[2]
+    fire(p20, 2, "I", "BR", 1, "60,240,1D", "TWB", "Tweezer Bottom", 67,
+         "Trend: Downtrend ✓",
+         "A bearish candle then a bullish candle sharing the same low. Two " +
+         "rejections from one level means real demand defending it.",
+         "SL: below the twin lows | TP: nearest resistance / swing high",
+         "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 22 Matching Low
-    if matchingLowShape and downTrend[2]
-        fire(p22, 2, "R", "BR", 1, "240,1D", "ML", "Matching Low", 62,
-             "Trend: Downtrend ✓",
-             "Two bearish candles closing at the same level: sellers out of ammunition " +
-             "at that price. Confirmation is mandatory.",
-             "SL: below the matching close | TP: nearest resistance",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 21 Tweezer Top
+if confirmed and tweezerTopShape and upTrend[2]
+    fire(p21, 2, "I", "SR", -1, "60,240,1D", "TWT", "Tweezer Top", 67,
+         "Trend: Uptrend ✓",
+         "A bullish candle then a bearish candle sharing the same high: real supply " +
+         "capping the advance.",
+         "SL: above the twin highs | TP: nearest support / swing low",
+         "H1 · H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 23 Matching High
-    if matchingHighShape and upTrend[2]
-        fire(p23, 2, "R", "SR", -1, "240,1D", "MH", "Matching High", 62,
-             "Trend: Uptrend ✓",
-             "Two bullish candles opening at the same level with no meaningful new " +
-             "close: a stalled buyer thrust. Not the same as a tweezer top.",
-             "SL: above the formation high | TP: nearest support",
-             "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
+// 22 Matching Low
+if confirmed and matchingLowShape and downTrend[2]
+    fire(p22, 2, "R", "BR", 1, "240,1D", "ML", "Matching Low", 62,
+         "Trend: Downtrend ✓",
+         "Two bearish candles closing at the same level: sellers out of ammunition " +
+         "at that price. Confirmation is mandatory.",
+         "SL: below the matching close | TP: nearest resistance",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 24 Stick Sandwich
-    if stickSandwichShape and downTrend[3]
-        fire(p24, 3, "R", "BR", 1, "1D", "SSW", "Stick Sandwich", 60,
-             "Trend: Downtrend ✓",
-             "Bearish, bullish, bearish with the first and third closes matching. The " +
-             "shared close becomes the support that must hold.",
-             "SL: below the twin-close level | TP: nearest resistance",
-             "D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 23 Matching High
+if confirmed and matchingHighShape and upTrend[2]
+    fire(p23, 2, "R", "SR", -1, "240,1D", "MH", "Matching High", 62,
+         "Trend: Uptrend ✓",
+         "Two bullish candles opening at the same level with no meaningful new " +
+         "close: a stalled buyer thrust. Not the same as a tweezer top.",
+         "SL: above the formation high | TP: nearest support",
+         "H4 · D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 25 Kicking Pattern
-    if kickingShape and downTrend[2]
-        fire(p25, 2, "R", "BR", 1, "1D", "KCK", "Kicking Pattern (Bullish)", 72,
-             "Trend: End of downtrend ✓",
-             "Bearish marubozu, a true gap up, then a bullish marubozu with no body " +
-             "overlap. The gap IS the pattern. Spot forex gaps far less often.",
-             "SL: below the gap / candle 2 low | TP: next resistance",
-             "D1", math.max(high, high[1]), math.min(low, low[1]))
+// 24 Stick Sandwich
+if confirmed and stickSandwichShape and downTrend[3]
+    fire(p24, 3, "R", "BR", 1, "1D", "SSW", "Stick Sandwich", 60,
+         "Trend: Downtrend ✓",
+         "Bearish, bullish, bearish with the first and third closes matching. The " +
+         "shared close becomes the support that must hold.",
+         "SL: below the twin-close level | TP: nearest resistance",
+         "D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 26 Morning Star
-    if morningStarShape and not dojiShape[1] and downTrend[3]
-        fire(p26, 3, "M", "BR", 1, "240,1D", "MS", "Morning Star", 76,
-             "Trend: Mature downtrend ✓",
-             "Long bearish candle, small star, then a strong bullish candle closing back " +
-             "into at least the midpoint of candle 1.",
-             "SL: below the star low | TP: nearest resistance / swing high",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 25 Kicking Pattern
+if confirmed and kickingShape and downTrend[2]
+    fire(p25, 2, "R", "BR", 1, "1D", "KCK", "Kicking Pattern (Bullish)", 72,
+         "Trend: End of downtrend ✓",
+         "Bearish marubozu, a true gap up, then a bullish marubozu with no body " +
+         "overlap. The gap IS the pattern. Spot forex gaps far less often.",
+         "SL: below the gap / candle 2 low | TP: next resistance",
+         "D1", math.max(high, high[1]), math.min(low, low[1]))
 
-    // 27 Evening Star
-    if eveningStarShape and not dojiShape[1] and upTrend[3]
-        fire(p27, 3, "M", "SR", -1, "240,1D", "ES", "Evening Star", 76,
-             "Trend: Mature uptrend ✓",
-             "Long bullish candle, small star, then a strong bearish candle closing back " +
-             "into at least the midpoint of candle 1.",
-             "SL: above the star high | TP: nearest support / swing low",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 26 Morning Star
+if confirmed and morningStarShape and not dojiShape[1] and downTrend[3]
+    fire(p26, 3, "M", "BR", 1, "240,1D", "MS", "Morning Star", 76,
+         "Trend: Mature downtrend ✓",
+         "Long bearish candle, small star, then a strong bullish candle closing back " +
+         "into at least the midpoint of candle 1.",
+         "SL: below the star low | TP: nearest resistance / swing high",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 28 Morning Doji Star
-    if morningDojiShape and downTrend[3]
-        fire(p28, 3, "I", "BR", 1, "240,1D", "MDS", "Morning Doji Star", 78,
-             "Trend: Long downtrend ✓",
-             "Morning star with a doji as the star: sellers cannot even close lower. " +
-             "Candle 3 must still recover into candle 1's body.",
-             "SL: below the doji low | TP: nearest resistance",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 27 Evening Star
+if confirmed and eveningStarShape and not dojiShape[1] and upTrend[3]
+    fire(p27, 3, "M", "SR", -1, "240,1D", "ES", "Evening Star", 76,
+         "Trend: Mature uptrend ✓",
+         "Long bullish candle, small star, then a strong bearish candle closing back " +
+         "into at least the midpoint of candle 1.",
+         "SL: above the star high | TP: nearest support / swing low",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 29 Evening Doji Star
-    if eveningDojiShape and upTrend[3]
-        fire(p29, 3, "I", "SR", -1, "240,1D", "EDS", "Evening Doji Star", 78,
-             "Trend: Long uptrend ✓",
-             "Evening star with a doji as the star. Candle 3 must recover into candle " +
-             "1's body.",
-             "SL: above the doji high | TP: nearest support",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 28 Morning Doji Star
+if confirmed and morningDojiShape and downTrend[3]
+    fire(p28, 3, "I", "BR", 1, "240,1D", "MDS", "Morning Doji Star", 78,
+         "Trend: Long downtrend ✓",
+         "Morning star with a doji as the star: sellers cannot even close lower. " +
+         "Candle 3 must still recover into candle 1's body.",
+         "SL: below the doji low | TP: nearest resistance",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 30 Three White Soldiers
-    if threeWhiteSoldiersShape and not upTrend[3]
-        fire(p30, 3, "M", "BR", 1, "240,1D", "TWS", "Three White Soldiers", 75,
-             "Trend: Downtrend / consolidation breakout ✓",
-             "Three consecutive bullish candles, each opening inside the prior body, " +
-             "higher closes and short upper shadows: sustained commitment.",
-             "SL: below candle 1 low or the last candle midpoint | TP: structure / trail",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 29 Evening Doji Star
+if confirmed and eveningDojiShape and upTrend[3]
+    fire(p29, 3, "I", "SR", -1, "240,1D", "EDS", "Evening Doji Star", 78,
+         "Trend: Long uptrend ✓",
+         "Evening star with a doji as the star. Candle 3 must recover into candle " +
+         "1's body.",
+         "SL: above the doji high | TP: nearest support",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 31 Three Black Crows
-    if threeBlackCrowsShape and not downTrend[3]
-        fire(p31, 3, "M", "SR", -1, "240,1D", "TBC", "Three Black Crows", 75,
-             "Trend: Uptrend / consolidation breakdown ✓",
-             "Three consecutive bearish candles, opens inside the prior body, lower " +
-             "closes and short lower shadows: sustained distribution.",
-             "SL: above candle 1 high or the last candle midpoint | TP: structure / trail",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 30 Three White Soldiers
+if confirmed and threeWhiteSoldiersShape and not upTrend[3]
+    fire(p30, 3, "M", "BR", 1, "240,1D", "TWS", "Three White Soldiers", 75,
+         "Trend: Downtrend / consolidation breakout ✓",
+         "Three consecutive bullish candles, each opening inside the prior body, " +
+         "higher closes and short upper shadows: sustained commitment.",
+         "SL: below candle 1 low or the last candle midpoint | TP: structure / trail",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 32 Three Inside Up
-    if threeInsideUpShape and downTrend[3]
-        fire(p32, 3, "I", "BR", 1, "240,1D", "TIU", "Three Inside Up", 71,
-             "Trend: Downtrend ✓",
-             "Bullish harami confirmed by a third bullish candle closing above candle " +
-             "1's high. The third candle IS the confirmation.",
-             "SL: below candle 1 low | TP: nearest resistance",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 31 Three Black Crows
+if confirmed and threeBlackCrowsShape and not downTrend[3]
+    fire(p31, 3, "M", "SR", -1, "240,1D", "TBC", "Three Black Crows", 75,
+         "Trend: Uptrend / consolidation breakdown ✓",
+         "Three consecutive bearish candles, opens inside the prior body, lower " +
+         "closes and short lower shadows: sustained distribution.",
+         "SL: above candle 1 high or the last candle midpoint | TP: structure / trail",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 33 Three Inside Down
-    if threeInsideDownShape and upTrend[3]
-        fire(p33, 3, "I", "SR", -1, "240,1D", "TID", "Three Inside Down", 71,
-             "Trend: Uptrend ✓",
-             "Bearish harami confirmed by a third bearish candle closing below candle " +
-             "1's low.",
-             "SL: above candle 1 high | TP: nearest support",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 32 Three Inside Up
+if confirmed and threeInsideUpShape and downTrend[3]
+    fire(p32, 3, "I", "BR", 1, "240,1D", "TIU", "Three Inside Up", 71,
+         "Trend: Downtrend ✓",
+         "Bullish harami confirmed by a third bullish candle closing above candle " +
+         "1's high. The third candle IS the confirmation.",
+         "SL: below candle 1 low | TP: nearest resistance",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 34 Three Outside Up
-    if threeOutsideUpShape and downTrend[3]
-        fire(p34, 3, "I", "BR", 1, "240,1D", "TOU", "Three Outside Up", 73,
-             "Trend: Downtrend ✓",
-             "Bullish engulfing followed by a third bullish candle making a higher " +
-             "close: buyers take over and keep pressing.",
-             "SL: below the engulfing low | TP: nearest resistance",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 33 Three Inside Down
+if confirmed and threeInsideDownShape and upTrend[3]
+    fire(p33, 3, "I", "SR", -1, "240,1D", "TID", "Three Inside Down", 71,
+         "Trend: Uptrend ✓",
+         "Bearish harami confirmed by a third bearish candle closing below candle " +
+         "1's low.",
+         "SL: above candle 1 high | TP: nearest support",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 35 Three Outside Down
-    if threeOutsideDownShape and upTrend[3]
-        fire(p35, 3, "I", "SR", -1, "240,1D", "TOD", "Three Outside Down", 73,
-             "Trend: Uptrend ✓",
-             "Bearish engulfing followed by a third bearish candle making a lower close.",
-             "SL: above the engulfing high | TP: nearest support",
-             "H4 · D1", math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 34 Three Outside Up
+if confirmed and threeOutsideUpShape and downTrend[3]
+    fire(p34, 3, "I", "BR", 1, "240,1D", "TOU", "Three Outside Up", 73,
+         "Trend: Downtrend ✓",
+         "Bullish engulfing followed by a third bullish candle making a higher " +
+         "close: buyers take over and keep pressing.",
+         "SL: below the engulfing low | TP: nearest resistance",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 36 Rising Three Methods
-    if risingThreeShape and upTrend[4]
-        fire(p36, 3, "I", "CT", 1, "240,1D", "RTM", "Rising Three Methods", 70,
-             "Trend: Healthy uptrend ✓",
-             "Long bullish candle, three smaller candles fully contained in its range, " +
-             "then a long bullish candle breaking above candle 1: healthy consolidation.",
-             "SL: below the small-candle group | TP: candle 1 height projected / trail",
-             "H4 · D1",
-             math.max(high, math.max(math.max(high[1], high[2]),
-             math.max(high[3], high[4]))),
-             math.min(low, math.min(math.min(low[1], low[2]),
-             math.min(low[3], low[4]))))
+// 35 Three Outside Down
+if confirmed and threeOutsideDownShape and upTrend[3]
+    fire(p35, 3, "I", "SR", -1, "240,1D", "TOD", "Three Outside Down", 73,
+         "Trend: Uptrend ✓",
+         "Bearish engulfing followed by a third bearish candle making a lower close.",
+         "SL: above the engulfing high | TP: nearest support",
+         "H4 · D1", math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 37 Falling Three Methods
-    if fallingThreeShape and downTrend[4]
-        fire(p37, 3, "I", "CT", -1, "240,1D", "FTM", "Falling Three Methods", 70,
-             "Trend: Healthy downtrend ✓",
-             "Long bearish candle, three smaller candles contained in its range, then a " +
-             "long bearish candle breaking below candle 1.",
-             "SL: above the small-candle group | TP: candle 1 height projected / trail",
-             "H4 · D1",
-             math.max(high, math.max(math.max(high[1], high[2]),
-             math.max(high[3], high[4]))),
-             math.min(low, math.min(math.min(low[1], low[2]),
-             math.min(low[3], low[4]))))
+// 36 Rising Three Methods
+if confirmed and risingThreeShape and upTrend[4]
+    fire(p36, 3, "I", "CT", 1, "240,1D", "RTM", "Rising Three Methods", 70,
+         "Trend: Healthy uptrend ✓",
+         "Long bullish candle, three smaller candles fully contained in its range, " +
+         "then a long bullish candle breaking above candle 1: healthy consolidation.",
+         "SL: below the small-candle group | TP: candle 1 height projected / trail",
+         "H4 · D1",
+         math.max(high, math.max(math.max(high[1], high[2]),
+         math.max(high[3], high[4]))),
+         math.min(low, math.min(math.min(low[1], low[2]),
+         math.min(low[3], low[4]))))
 
-    // 38 Breakaway Bullish
-    if breakawayBullShape and downTrend[5]
-        fire(p38, 3, "R", "BR", 1, "1D", "BWY", "Breakaway (Bullish)", 68,
-             "Trend: End of downtrend ✓",
-             "Long bearish candle, gap down, small candles failing to extend the decline, " +
-             "then a strong bullish candle reclaiming the gap into candle 1's body.",
-             "SL: below the small-candle group | TP: candle 1 close, then next resistance",
-             "D1",
-             math.max(high, math.max(math.max(high[1], high[2]), high[3])),
-             math.min(low, math.min(math.min(low[1], low[2]), low[3])))
+// 37 Falling Three Methods
+if confirmed and fallingThreeShape and downTrend[4]
+    fire(p37, 3, "I", "CT", -1, "240,1D", "FTM", "Falling Three Methods", 70,
+         "Trend: Healthy downtrend ✓",
+         "Long bearish candle, three smaller candles contained in its range, then a " +
+         "long bearish candle breaking below candle 1.",
+         "SL: above the small-candle group | TP: candle 1 height projected / trail",
+         "H4 · D1",
+         math.max(high, math.max(math.max(high[1], high[2]),
+         math.max(high[3], high[4]))),
+         math.min(low, math.min(math.min(low[1], low[2]),
+         math.min(low[3], low[4]))))
 
-    // 39 Ladder Bottom
-    if ladderBottomShape and downTrend[5]
-        fire(p39, 3, "R", "BR", 1, "1D", "LDB", "Ladder Bottom", 69,
-             "Trend: Final phase of downtrend ✓",
-             "Three declining bearish candles, a fourth bearish candle with an upper " +
-             "shadow (failed rebound), then a strong bullish candle opening above it.",
-             "SL: below the pattern low | TP: nearest resistance / ladder height",
-             "D1",
-             math.max(high, math.max(math.max(high[1], high[2]),
-             math.max(high[3], high[4]))),
-             math.min(low, math.min(math.min(low[1], low[2]),
-             math.min(low[3], low[4]))))
+// 38 Breakaway Bullish
+if confirmed and breakawayBullShape and downTrend[5]
+    fire(p38, 3, "R", "BR", 1, "1D", "BWY", "Breakaway (Bullish)", 68,
+         "Trend: End of downtrend ✓",
+         "Long bearish candle, gap down, small candles failing to extend the decline, " +
+         "then a strong bullish candle reclaiming the gap into candle 1's body.",
+         "SL: below the small-candle group | TP: candle 1 close, then next resistance",
+         "D1",
+         math.max(high, math.max(math.max(high[1], high[2]), high[3])),
+         math.min(low, math.min(math.min(low[1], low[2]), low[3])))
 
-    // 40 Concealing Baby Swallow
-    if concealingBabySwallowShape and downTrend[4]
-        fire(p40, 3, "R", "BR", 1, "1D", "CBS", "Concealing Baby Swallow", 67,
-             "Trend: Deep downtrend ✓",
-             "Four-candle capitulation structure: candle 3 gaps down with its upper " +
-             "shadow into candle 2's body, and candle 4 engulfs it entirely.",
-             "SL: below candle 4 low | TP: nearest resistance (needs a bullish candle 5)",
-             "D1",
-             math.max(high, math.max(high[1], math.max(high[2], high[3]))),
-             math.min(low, math.min(low[1], math.min(low[2], low[3]))))
+// 39 Ladder Bottom
+if confirmed and ladderBottomShape and downTrend[5]
+    fire(p39, 3, "R", "BR", 1, "1D", "LDB", "Ladder Bottom", 69,
+         "Trend: Final phase of downtrend ✓",
+         "Three declining bearish candles, a fourth bearish candle with an upper " +
+         "shadow (failed rebound), then a strong bullish candle opening above it.",
+         "SL: below the pattern low | TP: nearest resistance / ladder height",
+         "D1",
+         math.max(high, math.max(math.max(high[1], high[2]),
+         math.max(high[3], high[4]))),
+         math.min(low, math.min(math.min(low[1], low[2]),
+         math.min(low[3], low[4]))))
 
-    // 41 Unique Three River
-    if uniqueThreeRiverShape and downTrend[3]
-        fire(p41, 3, "R", "BR", 1, "1D", "UTR", "Unique Three River", 65,
-             "Trend: Deep downtrend ✓",
-             "Long bearish candle, a hammer making a new low, then a small bullish candle " +
-             "inside the hammer body: seller hesitation, not a standalone entry.",
-             "SL: below the hammer low | TP: nearest resistance (conservative)",
-             "D1",
-             math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 40 Concealing Baby Swallow
+if confirmed and concealingBabySwallowShape and downTrend[4]
+    fire(p40, 3, "R", "BR", 1, "1D", "CBS", "Concealing Baby Swallow", 67,
+         "Trend: Deep downtrend ✓",
+         "Four-candle capitulation structure: candle 3 gaps down with its upper " +
+         "shadow into candle 2's body, and candle 4 engulfs it entirely.",
+         "SL: below candle 4 low | TP: nearest resistance (needs a bullish candle 5)",
+         "D1",
+         math.max(high, math.max(high[1], math.max(high[2], high[3]))),
+         math.min(low, math.min(low[1], math.min(low[2], low[3]))))
 
-    // 42 Tri-Star
-    if triStarShape and downTrend[3]
-        fire(p42, 3, "R", "BR", 1, "1D,1W", "TS", "Tri-Star (Bullish)", 71,
-             "Trend: Long downtrend ✓",
-             "Three consecutive dojis with the middle one at the extreme: a complete " +
-             "directional vacuum at the end of a decline.",
-             "SL: below the middle doji low | TP: nearest resistance / trail",
-             "D1 · W1",
-             math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 41 Unique Three River
+if confirmed and uniqueThreeRiverShape and downTrend[3]
+    fire(p41, 3, "R", "BR", 1, "1D", "UTR", "Unique Three River", 65,
+         "Trend: Deep downtrend ✓",
+         "Long bearish candle, a hammer making a new low, then a small bullish candle " +
+         "inside the hammer body: seller hesitation, not a standalone entry.",
+         "SL: below the hammer low | TP: nearest resistance (conservative)",
+         "D1",
+         math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 43 Advance Block
-    if advanceBlockShape and upTrend[3]
-        fire(p43, 3, "I", "SR", -1, "240,1D", "AB", "Advance Block", 64,
-             "Trend: Late uptrend ✓",
-             "Three bullish candles keep advancing, but bodies shrink while upper shadows " +
-             "grow: rising prices with falling buying efficiency.",
-             "SL: above the pattern high | TP: nearest support after confirmation",
-             "H4 · D1",
-             math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 42 Tri-Star
+if confirmed and triStarShape and downTrend[3]
+    fire(p42, 3, "R", "BR", 1, "1D,1W", "TS", "Tri-Star (Bullish)", 71,
+         "Trend: Long downtrend ✓",
+         "Three consecutive dojis with the middle one at the extreme: a complete " +
+         "directional vacuum at the end of a decline.",
+         "SL: below the middle doji low | TP: nearest resistance / trail",
+         "D1 · W1",
+         math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 44 Deliberation
-    if deliberationShape and upTrend[3]
-        fire(p44, 3, "I", "SR", -1, "240,1D", "DEL", "Deliberation", 63,
-             "Trend: Mature uptrend ✓",
-             "Two advancing bullish candles followed by a small candle with an upper " +
-             "shadow opening inside candle 2's body: collective hesitation.",
-             "SL: above the pattern high | TP: nearest support after confirmation",
-             "H4 · D1",
-             math.max(high, math.max(high[1], high[2])),
-             math.min(low, math.min(low[1], low[2])))
+// 43 Advance Block
+if confirmed and advanceBlockShape and upTrend[3]
+    fire(p43, 3, "I", "SR", -1, "240,1D", "AB", "Advance Block", 64,
+         "Trend: Late uptrend ✓",
+         "Three bullish candles keep advancing, but bodies shrink while upper shadows " +
+         "grow: rising prices with falling buying efficiency.",
+         "SL: above the pattern high | TP: nearest support after confirmation",
+         "H4 · D1",
+         math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
 
-    // 45 Ladder Top
-    if ladderTopShape and upTrend[5]
-        fire(p45, 3, "R", "SR", -1, "1D", "LDT", "Ladder Top", 62,
-             "Trend: Mature uptrend ✓",
-             "Three rising bullish candles, a smaller fourth candle with lower rejection, " +
-             "then a strong bearish candle closing below candle 4's low. The bearish " +
-             "break is the confirmation.",
-             "SL: above the pattern high | TP: nearest support / swing low",
-             "D1",
-             math.max(high, math.max(high[1], math.max(high[2],
-             math.max(high[3], math.max(high[4], high[5]))))),
-             math.min(low, math.min(low[1], math.min(low[2],
-             math.min(low[3], math.min(low[4], low[5]))))))
+// 44 Deliberation
+if confirmed and deliberationShape and upTrend[3]
+    fire(p44, 3, "I", "SR", -1, "240,1D", "DEL", "Deliberation", 63,
+         "Trend: Mature uptrend ✓",
+         "Two advancing bullish candles followed by a small candle with an upper " +
+         "shadow opening inside candle 2's body: collective hesitation.",
+         "SL: above the pattern high | TP: nearest support after confirmation",
+         "H4 · D1",
+         math.max(high, math.max(high[1], high[2])),
+         math.min(low, math.min(low[1], low[2])))
+
+// 45 Ladder Top
+if confirmed and ladderTopShape and upTrend[5]
+    fire(p45, 3, "R", "SR", -1, "1D", "LDT", "Ladder Top", 62,
+         "Trend: Mature uptrend ✓",
+         "Three rising bullish candles, a smaller fourth candle with lower rejection, " +
+         "then a strong bearish candle closing below candle 4's low. The bearish " +
+         "break is the confirmation.",
+         "SL: above the pattern high | TP: nearest support / swing low",
+         "D1",
+         math.max(high, math.max(high[1], math.max(high[2],
+         math.max(high[3], math.max(high[4], high[5]))))),
+         math.min(low, math.min(low[1], math.min(low[2],
+         math.min(low[3], math.min(low[4], low[5]))))))
 
 // ═════════════════════════════ ALERT CONDITIONS ═════════════════════════════
 
@@ -1720,43 +1730,43 @@ var line lastBullBreakLine = na
 var line lastBearBreakLine = na
 var label lastStructureLabel = na
 
-if barstate.isconfirmed and showStructure
-    if bullBOSEvent
-        if not na(lastBullBreakLine)
-            line.delete(lastBullBreakLine)
-        lastBullBreakLine := line.new(bar_index - 1, brokenSwingHigh,
-             bar_index, brokenSwingHigh, xloc = xloc.bar_index,
-             extend = extend.right, color = color.new(colBull, 20),
-             style = line.style_dashed, width = 2)
-        if not na(lastStructureLabel)
-            label.delete(lastStructureLabel)
-        lastStructureLabel := label.new(bar_index, brokenSwingHigh,
-             bullCHOCH ? "CHOCH+" : "BOS+",
-             xloc = xloc.bar_index, yloc = yloc.price,
-             style = label.style_label_down,
-             color = color.new(colBull, bullCHOCH ? 10 : 15),
-             textcolor = color.white, size = size.tiny,
-             tooltip = bullCHOCH ?
-             "Change of Character\nConfirmed bullish break after bearish structure.\nStructure context, not a guaranteed reversal." :
-             "Bullish Break of Structure\nConfirmed close above the latest confirmed swing high.")
-    if bearBOSEvent
-        if not na(lastBearBreakLine)
-            line.delete(lastBearBreakLine)
-        lastBearBreakLine := line.new(bar_index - 1, brokenSwingLow,
-             bar_index, brokenSwingLow, xloc = xloc.bar_index,
-             extend = extend.right, color = color.new(colBear, 20),
-             style = line.style_dashed, width = 2)
-        if not na(lastStructureLabel)
-            label.delete(lastStructureLabel)
-        lastStructureLabel := label.new(bar_index, brokenSwingLow,
-             bearCHOCH ? "CHOCH-" : "BOS-",
-             xloc = xloc.bar_index, yloc = yloc.price,
-             style = label.style_label_up,
-             color = color.new(colBear, bearCHOCH ? 10 : 15),
-             textcolor = color.white, size = size.tiny,
-             tooltip = bearCHOCH ?
-             "Change of Character\nConfirmed bearish break after bullish structure.\nStructure context, not a guaranteed reversal." :
-             "Bearish Break of Structure\nConfirmed close below the latest confirmed swing low.")
+// Kept as two flat blocks rather than one nested block: Pine limits how large a
+// single if body may be (CE10205).
+drawStructure = confirmed and showStructure
+bosTipBull = "Bullish Break of Structure\nConfirmed close above the latest confirmed swing high."
+bosTipBear = "Bearish Break of Structure\nConfirmed close below the latest confirmed swing low."
+chochTipBull = "Change of Character\nConfirmed bullish break after bearish structure.\nStructure context, not a guaranteed reversal."
+chochTipBear = "Change of Character\nConfirmed bearish break after bullish structure.\nStructure context, not a guaranteed reversal."
+
+if drawStructure and bullBOSEvent
+    line.delete(lastBullBreakLine)
+    label.delete(lastStructureLabel)
+    lastBullBreakLine := line.new(bar_index - 1, brokenSwingHigh,
+         bar_index, brokenSwingHigh, xloc = xloc.bar_index,
+         extend = extend.right, color = color.new(colBull, 20),
+         style = line.style_dashed, width = 2)
+    lastStructureLabel := label.new(bar_index, brokenSwingHigh,
+         bullCHOCH ? "CHOCH+" : "BOS+",
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = label.style_label_down,
+         color = color.new(colBull, bullCHOCH ? 10 : 15),
+         textcolor = color.white, size = size.tiny,
+         tooltip = bullCHOCH ? chochTipBull : bosTipBull)
+
+if drawStructure and bearBOSEvent
+    line.delete(lastBearBreakLine)
+    label.delete(lastStructureLabel)
+    lastBearBreakLine := line.new(bar_index - 1, brokenSwingLow,
+         bar_index, brokenSwingLow, xloc = xloc.bar_index,
+         extend = extend.right, color = color.new(colBear, 20),
+         style = line.style_dashed, width = 2)
+    lastStructureLabel := label.new(bar_index, brokenSwingLow,
+         bearCHOCH ? "CHOCH-" : "BOS-",
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = label.style_label_up,
+         color = color.new(colBear, bearCHOCH ? 10 : 15),
+         textcolor = color.white, size = size.tiny,
+         tooltip = bearCHOCH ? chochTipBear : bosTipBear)
 
 plot(showBB ? bbUpper : na, "BB Upper", color = color.new(color.gray, 70))
 plot(showBB ? bbBasis : na, "BB Basis", color = color.new(color.gray, 55))
@@ -1782,18 +1792,25 @@ plot(showSD and supplyZone ? supplyHigh : na, "Supply high",
 
 var table dash = table.new(position.top_right, 2, 14, border_width = 1)
 
-if barstate.islast and showPanel
-    int liveScore = math.max(liveBullScore, liveBearScore)
-    string dashSignal = strongChop and avoidChop ? "CHOP" :
-         liveBullScore >= minTradeScore and liveBullScore > liveBearScore ? "BUY BIAS" :
-         liveBearScore >= minTradeScore and liveBearScore > liveBullScore ? "SELL BIAS" : "WATCH"
-    color dashColor = dashSignal == "BUY BIAS" ? colBull :
-         dashSignal == "SELL BIAS" ? colBear :
-         dashSignal == "CHOP" ? colNeut : color.orange
-    string structureState = bullCHOCH ? "CHOCH+" : bearCHOCH ? "CHOCH-" :
-         bullBOSEvent ? "BOS+" : bearBOSEvent ? "BOS-" :
-         structDir == 1 ? "BULL" : structDir == -1 ? "BEAR" : "NONE"
+// Panel values are resolved at global scope to keep the if body short.
+liveScore = math.max(liveBullScore, liveBearScore)
+dashSignal = strongChop and avoidChop ? "CHOP" :
+     liveBullScore >= minTradeScore and liveBullScore > liveBearScore ? "BUY BIAS" :
+     liveBearScore >= minTradeScore and liveBearScore > liveBullScore ? "SELL BIAS" : "WATCH"
+dashColor = dashSignal == "BUY BIAS" ? colBull :
+     dashSignal == "SELL BIAS" ? colBear :
+     dashSignal == "CHOP" ? colNeut : color.orange
+structureState = bullCHOCH ? "CHOCH+" : bearCHOCH ? "CHOCH-" :
+     bullBOSEvent ? "BOS+" : bearBOSEvent ? "BOS-" :
+     structDir == 1 ? "BULL" : structDir == -1 ? "BEAR" : "NONE"
+lastPatternTxt = latestDir == 0 ? "-" :
+     str.tostring(latestConfidence) + "% " + (latestDir == 1 ? "BULL" : "BEAR")
+htfTxtPanel = htfBias + " " +
+     str.tostring(math.max(htfBullCount, htfBearCount)) + "/" + str.tostring(htfActive)
+bbTxtPanel = bbSqueeze ? "SQUEEZE" : bbExpanding ? "EXPANDING" : "NORMAL"
+macdTxtPanel = macdBullConfirm ? "BULL" : macdBearConfirm ? "BEAR" : "MIXED"
 
+if barstate.islast and showPanel
     table.cell(dash, 0, 0, "MASTER", text_color = color.white,
          bgcolor = color.new(color.black, 10), text_size = size.small)
     table.cell(dash, 1, 0, dashSignal, text_color = color.white,
@@ -1804,20 +1821,15 @@ if barstate.islast and showPanel
     table.cell(dash, 1, 2, str.tostring(liveBullScore) + " / " +
          str.tostring(liveBearScore), text_color = color.white)
     table.cell(dash, 0, 3, "Last pattern", text_color = color.white)
-    table.cell(dash, 1, 3, latestDir == 0 ? "-" :
-         str.tostring(latestConfidence) + "% " + (latestDir == 1 ? "BULL" : "BEAR"),
-         text_color = color.white)
+    table.cell(dash, 1, 3, lastPatternTxt, text_color = color.white)
     table.cell(dash, 0, 4, "Regime", text_color = color.white)
     table.cell(dash, 1, 4, regime, text_color = color.white)
     table.cell(dash, 0, 5, "HTF", text_color = color.white)
-    table.cell(dash, 1, 5, htfBias + " " +
-         str.tostring(math.max(htfBullCount, htfBearCount)) + "/" +
-         str.tostring(htfActive), text_color = color.white)
+    table.cell(dash, 1, 5, htfTxtPanel, text_color = color.white)
     table.cell(dash, 0, 6, "RSI", text_color = color.white)
     table.cell(dash, 1, 6, str.tostring(rsiVal, "#.#"), text_color = color.white)
     table.cell(dash, 0, 7, "MACD", text_color = color.white)
-    table.cell(dash, 1, 7, macdBullConfirm ? "BULL" :
-         macdBearConfirm ? "BEAR" : "MIXED", text_color = color.white)
+    table.cell(dash, 1, 7, macdTxtPanel, text_color = color.white)
     table.cell(dash, 0, 8, "ADX", text_color = color.white)
     table.cell(dash, 1, 8, adxAvailable ? str.tostring(adxVal, "#.#") : "N/A",
          text_color = color.white)
@@ -1825,8 +1837,7 @@ if barstate.islast and showPanel
     table.cell(dash, 1, 9, volAvailable ? (volOk ? "HIGH" : "NORMAL") : "N/A",
          text_color = color.white)
     table.cell(dash, 0, 10, "BB", text_color = color.white)
-    table.cell(dash, 1, 10, bbSqueeze ? "SQUEEZE" :
-         bbExpanding ? "EXPANDING" : "NORMAL", text_color = color.white)
+    table.cell(dash, 1, 10, bbTxtPanel, text_color = color.white)
     table.cell(dash, 0, 11, "Structure", text_color = color.white)
     table.cell(dash, 1, 11, structureState, text_color = color.white)
     table.cell(dash, 0, 12, "S/R touches", text_color = color.white)
@@ -1864,12 +1875,7 @@ if barstate.isconfirmed and array.size(insts) > 0
                     label.set_tooltip(inst.lb,
                          inst.abbr + "\n" + inst.pname + "\nStatus: " +
                          patternStatus(inst) + "\n" + inst.bodyTxt +
-                         (newState == 1 ? "\n\nTrade readiness: CONFIRMED " +
-                         (inst.confidence >= strongScore ? "HIGH-CONFLUENCE " :
-                         inst.confidence >= goodScore ? "GOOD-CONFLUENCE " : "LOW-CONFLUENCE ") +
-                         (inst.dir == 1 ? "BULLISH BIAS." : "BEARISH BIAS.") :
-                         newState == 2 ? "\n\nTrade readiness: FAILED - invalidation level breached." :
-                         newState == 4 ? "\n\nTrade readiness: EXPIRED - no breakout inside the window." : ""))
+                         readinessText(newState, inst.confidence, inst.dir))
 
                     if newState == 2 or newState == 4
                         label.set_color(inst.lb, color.new(inst.colMain, 75))

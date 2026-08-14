@@ -10,6 +10,8 @@ fixed in [`candlestick_master_pro.pine`](candlestick_master_pro.pine).
 | 1 | `str.tostring(=======confidence)` in the dashboard — a leftover merge-conflict marker. This alone stopped the script from compiling. | Removed. The panel now shows a real live score. |
 | 2 | Even without the marker, `confidence` did not exist at that point: it is local to `fire()`, so the dashboard could never read it. | Score computation was extracted into `confluenceScore()`, which the dashboard calls directly. |
 | 3 | `int latestPatternBar = … : na` — `na` in an `int` ternary. | Uses `-1` as the sentinel. |
+| 3a | `SHORT_TITLE_TOO_LONG` — `shorttitle` was `"CandleMasterPro"` (15 chars); the limit is 10. | Now `"CandlePro"` (9). |
+| 3b | `CE10205 The if statement is too long` — all 45 detections were nested inside one `if barstate.isconfirmed` body (~445 lines), exceeding Pine's per-`if`-body size limit. | The wrapper is gone: `confirmed = barstate.isconfirmed` is hoisted and each detection is its own flat `if confirmed and <shape> and <trend>`, so every `if` body is a single `fire()` call. Behaviour is identical — a nested `if A` inside `if B` is exactly `if B and A`. The BOS/CHOCH drawing block was split into two flat blocks for the same reason, the dashboard's locals were hoisted to global scope, and the tooltip suffix moved into `readinessText()`. The largest remaining `if` body is 35 lines. |
 
 ## 2. Wrong results (silent, worse than a compile error)
 
