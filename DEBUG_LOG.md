@@ -138,3 +138,29 @@ Two details worth recording, because they constrain how this refactor can be don
   feature: `structKeep` controls how many recent breaks stay on the chart.
 - **Blocks that produced several globals return tuples instead**
   (`scanFvgs`, `scanPattern`), for the same reason.
+
+## 8. CE10235 — incompatible if/else branch types (`Fvg; void`)
+
+`array.remove()` **returns the element it removed**. In the FVG retirement loop
+it was the last statement of the `if` branch, so that branch had the type `Fvg`
+while the `else` branch ended on a void `box.set_right()`:
+
+```pine
+if filled or expired
+    if not na(f.bx)
+        box.delete(f.bx)
+    array.remove(fvgs, i)        // <- branch type: Fvg
+else
+    if not na(f.bx)
+        box.set_right(f.bx, ...) // <- branch type: void
+```
+
+Rewritten as three separate `if`s with no `else`, so no two branches are ever
+compared. A bare `if` whose last statement returns a value is fine — the error
+only fires when an explicit `else` exists and the branches disagree, which is why
+`if array.size(supLevels) > 20 / array.shift(supLevels)` elsewhere is legal.
+
+`registerFvg` had the same shape without an `else`. It was reordered anyway
+(capture the element, remove it, then delete its box) so the branch ends void.
+The order matters for a second reason: the box id has to be read *before* the
+element leaves the array.

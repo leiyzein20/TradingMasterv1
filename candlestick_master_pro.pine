@@ -515,19 +515,21 @@ bearFvgQuality = bearFvgRaw ?
 
 // Retire filled / expired zones first, iterating downwards so removals cannot
 // invalidate the indices still to be visited.
+// Written as three separate `if`s with no `else` on purpose. array.remove()
+// RETURNS the element it removed, so ending a branch with it gives that branch
+// the type Fvg while the other branch is void, which Pine rejects (CE10235).
 retireFvgs() =>
     if array.size(fvgs) > 0
         for i = array.size(fvgs) - 1 to 0
             Fvg f = array.get(fvgs, i)
             bool filled = f.dir == 1 ? low <= f.bot : high >= f.top
-            bool expired = bar_index - f.barIdx > fvgLookback
-            if filled or expired
-                if not na(f.bx)
-                    box.delete(f.bx)
+            bool drop = filled or bar_index - f.barIdx > fvgLookback
+            if drop and not na(f.bx)
+                box.delete(f.bx)
+            if drop
                 array.remove(fvgs, i)
-            else
-                if not na(f.bx)
-                    box.set_right(f.bx, bar_index + 1)
+            if not drop and not na(f.bx)
+                box.set_right(f.bx, bar_index + 1)
 
 retireFvgs()
 
@@ -542,11 +544,14 @@ registerFvg(int dir, float top, float bot, int quality) =>
                 sameSide += 1
                 if oldestIdx == -1
                     oldestIdx := i
+    // Capture the element first, then remove, then delete its box: array.remove
+    // returns the removed element, so it must not be the last statement of the
+    // branch (CE10235), and the box id has to be read before the element goes.
     if sameSide >= fvgMaxZones and oldestIdx >= 0
         Fvg oldest = array.get(fvgs, oldestIdx)
+        array.remove(fvgs, oldestIdx)
         if not na(oldest.bx)
             box.delete(oldest.bx)
-        array.remove(fvgs, oldestIdx)
     box bx = na
     if showFVGZones
         bx := box.new(bar_index - 2, top, bar_index + 1, bot,
