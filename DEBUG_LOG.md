@@ -164,3 +164,33 @@ only fires when an explicit `else` exists and the branches disagree, which is wh
 (capture the element, remove it, then delete its box) so the branch ends void.
 The order matters for a second reason: the box id has to be read *before* the
 element leaves the array.
+
+## 9. CE10117 — compiled code contains too many tokens (108,925 / 100,256)
+
+A hard ceiling on the whole script, not just the global scope, so this needed
+real volume reduction rather than relocation. Measured the token distribution
+per section first, then cut the largest contributors:
+
+| Change | Est. tokens saved |
+|---|---|
+| **Rolling extremes `hi2…hi6` / `lo2…lo6`** precomputed once, replacing nested `math.max(high, math.max(math.max(high[1], high[2]), …))` at 45 call sites | ~8,600 |
+| `confluenceText()` rebuilt around a `chk(ok, name)` helper instead of a bespoke sentence for every state of every indicator | ~2,000 |
+| Dropped `trendTxt`, `sltp`, `tfHuman` from `fire()` — the trend is implied by the gate, the SL/TP prose is superseded by the computed levels, and the ideal-TF text duplicated `tfList` | ~1,900 |
+| `scalpReasons()` and `signalTooltip()` rebuilt on the same helper; the tooltip now defers detail to the signal table | ~1,600 |
+| Panel trimmed from 21 rows to 13 — the RSI/MACD/ADX/Volume/Bollinger number rows moved to the companion oscillator pane | ~1,300 |
+| 30 niche inputs became constants (all 12 colours, 8 FVG tuning knobs, Fib pocket bounds, lot step, and others) | ~1,200 |
+| Signal detail table 16 rows → 13, legend 16 → 15 | ~700 |
+
+Result: **108,925 → ~92,000 tokens**, about 8% under the limit.
+
+The `hi2…lo6` change is the interesting one — it was pure repetition. Forty-odd
+copies of a five-call nested expression cost more than every input in the script
+combined, and collapsing them changed no behaviour at all.
+
+Nothing was removed from the pattern set: all 45 patterns, their geometry, the
+per-pattern toggles and the lifecycle tracking are intact. What went is
+duplicated prose and configuration nobody needs to touch.
+
+One follow-on bug from this pass, caught before shipping: moving `confluenceText`
+introduced the `chk()` helper *after* `scalpReasons()`, which also uses it —
+a forward reference. `chk()` now sits above both.
