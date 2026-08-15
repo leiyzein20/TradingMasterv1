@@ -943,27 +943,6 @@ scalpReasons(int dir) =>
          "• Target size: TP1 below the minimum pip filter ✗"
     s
 
-// Names the FIRST gate that is blocking a signal, so it is obvious why nothing
-// is firing instead of having to guess.
-signalBlocker(int dir) =>
-    bool bull = dir == 1
-    string r = not (bull ? biasBull : biasBear) ?
-         "HTF bias not aligned (" + htfB + " + " + htfC + ")" :
-         not sessionOk ? "outside killzone" :
-         (avoidChop and strongChop) ? "chop filter active" :
-         not (bull ? pullbackLong : pullbackShort) ? "no pullback into value" :
-         not notExtended ? "too extended (" + str.tostring(extFromEma, "#.##") + " ATR from EMA)" :
-         not (bull ? bullEntryTrigger : bearEntryTrigger) ? "no trigger candle or pattern" :
-         (bull ? momBullCount : momBearCount) < 2 ?
-         "momentum only " + str.tostring(bull ? momBullCount : momBearCount) + "/3" :
-         not (bull ? structDir >= 0 : structDir <= 0) ? "structure against the trade" :
-         not (bull ? fibLongOk : fibShortOk) ? "wrong side of the Fib leg (" + fibZoneTxt + ")" :
-         not (bull ? tgtOkLong : tgtOkShort) ?
-         "TP1 only " + str.tostring((bull ? riskLong : riskShort) * sigRR1 / pipSize, "#.#") +
-         " pips, need " + str.tostring(minTargetPips, "#.#") :
-         "score gate"
-    r
-
 // ═══════════════════════════ CONFLUENCE ENGINE ══════════════════════════════
 // Family weighting. A family contributes its full weight only when every
 // enabled check inside it passes, so five correlated momentum indicators can
@@ -2128,6 +2107,27 @@ scanPattern(int dir) =>
 // as a fallback so pure continuation entries are not lost.
 bullEntryTrigger = bullPatConf >= 0 or bullTrigger
 bearEntryTrigger = bearPatConf >= 0 or bearTrigger
+
+// Names the FIRST gate that is blocking a signal, so it is obvious why nothing
+// is firing instead of having to guess.
+signalBlocker(int dir) =>
+    bool bull = dir == 1
+    string r = not (bull ? biasBull : biasBear) ?
+         "HTF bias not aligned (" + htfB + " + " + htfC + ")" :
+         not sessionOk ? "outside killzone" :
+         (avoidChop and strongChop) ? "chop filter active" :
+         not (bull ? pullbackLong : pullbackShort) ? "no pullback into value" :
+         not notExtended ? "too extended (" + str.tostring(extFromEma, "#.##") + " ATR from EMA)" :
+         not (bull ? bullEntryTrigger : bearEntryTrigger) ? "no trigger candle or pattern" :
+         (bull ? momBullCount : momBearCount) < 2 ?
+         "momentum only " + str.tostring(bull ? momBullCount : momBearCount) + "/3" :
+         not (bull ? structDir >= 0 : structDir <= 0) ? "structure against the trade" :
+         not (bull ? fibLongOk : fibShortOk) ? "wrong side of the Fib leg (" + fibZoneTxt + ")" :
+         not (bull ? tgtOkLong : tgtOkShort) ?
+         "TP1 only " + str.tostring((bull ? riskLong : riskShort) * sigRR1 / pipSize, "#.#") +
+         " pips, need " + str.tostring(minTargetPips, "#.#") :
+         "score gate"
+    r
 bullRelUsed = bullPatConf >= 0 ? bullPatRel : 65
 bearRelUsed = bearPatConf >= 0 ? bearPatRel : 65
 
