@@ -1,0 +1,142 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+// CANDLE MASTER — OSCILLATOR PANE  (companion to candlestick_master_pro.pine)
+//
+// RSI, MACD and Stochastic cannot be drawn on a price chart: they live on a
+// 0-100 or zero-centred scale, so on a price axis they would be a flat line at
+// the bottom. That is why the main indicator shows them as numbers in its panel
+// and not as chart lines.
+//
+// This script puts them in their own pane BELOW the chart, using the same
+// colours and the same thresholds as the main indicator, so the two agree.
+//
+// HOW TO USE
+//   Add this to the same chart. It opens in a separate pane underneath.
+//   Pick which oscillator with the "Show" input. To see two at once, add the
+//   script twice and set a different "Show" on each.
+//
+//   RSI and Stochastic share the 0-100 scale and can be shown together.
+//   MACD has its own scale, so give it its own copy of the script.
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("Candle Master Oscillators", "CM Osc", overlay = false, precision = 2)
+
+mode = input.string("RSI + Stochastic", "Show",
+     options = ["RSI + Stochastic", "RSI", "Stochastic", "MACD"])
+
+grpR = "RSI"
+rsiLen = input.int(14, "RSI length", group = grpR, minval = 2)
+rsiOS = input.int(35, "RSI oversold", group = grpR, minval = 1, maxval = 50)
+rsiOB = input.int(65, "RSI overbought", group = grpR, minval = 50, maxval = 99)
+maxRsiChase = input.float(78.0, "Do-not-chase level", group = grpR,
+     minval = 55.0, maxval = 95.0, step = 1.0,
+     tooltip = "Match this to the main indicator. Above it, a long is chasing; below 100 minus it, a short is chasing.")
+
+grpS = "Stochastic"
+stochLen = input.int(14, "Stochastic length", group = grpS, minval = 2)
+stochSmoothK = input.int(3, "%K smoothing", group = grpS, minval = 1)
+stochSmoothD = input.int(3, "%D smoothing", group = grpS, minval = 1)
+stochOS = input.int(20, "Oversold", group = grpS, minval = 1, maxval = 50)
+stochOB = input.int(80, "Overbought", group = grpS, minval = 50, maxval = 99)
+
+grpM = "MACD"
+macdFast = input.int(12, "Fast", group = grpM, minval = 1)
+macdSlow = input.int(26, "Slow", group = grpM, minval = 2)
+macdSignalLen = input.int(9, "Signal", group = grpM, minval = 1)
+
+grpC = "Colours (match the main indicator)"
+cRsi = input.color(#00E5FF, "RSI line", group = grpC)
+cStochK = input.color(#FFD600, "Stochastic %K", group = grpC)
+cStochD = input.color(#E040FB, "Stochastic %D", group = grpC)
+cMacd = input.color(#2962FF, "MACD line", group = grpC)
+cSignal = input.color(#FF6D00, "MACD signal", group = grpC)
+cUp = input.color(#00C853, "Bullish", group = grpC)
+cDn = input.color(#D50000, "Bearish", group = grpC)
+
+// ── Calculations ────────────────────────────────────────────────────────────
+// Identical to the main indicator so the two panes never disagree.
+rsiVal = ta.rsi(close, rsiLen)
+stochK = ta.sma(ta.stoch(close, high, low, stochLen), stochSmoothK)
+stochD = ta.sma(stochK, stochSmoothD)
+[macdLine, macdSignalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignalLen)
+
+showRsi = mode == "RSI" or mode == "RSI + Stochastic"
+showStoch = mode == "Stochastic" or mode == "RSI + Stochastic"
+showMacd = mode == "MACD"
+
+// ── RSI ─────────────────────────────────────────────────────────────────────
+plot(showRsi ? rsiVal : na, "RSI", color = cRsi, linewidth = 2)
+plot(showRsi ? float(rsiOB) : na, "RSI overbought", color = color.new(cDn, 60),
+     style = plot.style_linebr)
+plot(showRsi ? float(rsiOS) : na, "RSI oversold", color = color.new(cUp, 60),
+     style = plot.style_linebr)
+plot(showRsi ? 50.0 : na, "RSI midline", color = color.new(color.gray, 60),
+     style = plot.style_linebr)
+plot(showRsi ? maxRsiChase : na, "Do not chase (long)",
+     color = color.new(cDn, 25), style = plot.style_linebr, linewidth = 1)
+plot(showRsi ? 100.0 - maxRsiChase : na, "Do not chase (short)",
+     color = color.new(cUp, 25), style = plot.style_linebr, linewidth = 1)
+
+// ── Stochastic ──────────────────────────────────────────────────────────────
+kP = plot(showStoch ? stochK : na, "Stoch %K", color = cStochK, linewidth = 2)
+dP = plot(showStoch ? stochD : na, "Stoch %D", color = cStochD, linewidth = 1)
+fill(kP, dP, color = color.new(stochK > stochD ? cUp : cDn, 85),
+     title = "Stoch %K/%D spread")
+plot(showStoch ? float(stochOB) : na, "Stoch overbought",
+     color = color.new(cDn, 70), style = plot.style_linebr)
+plot(showStoch ? float(stochOS) : na, "Stoch oversold",
+     color = color.new(cUp, 70), style = plot.style_linebr)
+
+// ── MACD ────────────────────────────────────────────────────────────────────
+// Four-state histogram: rising above zero, falling above zero, falling below
+// zero, rising below zero. The turn is visible before the crossover.
+histUp = macdHist >= 0
+histRising = macdHist > macdHist[1]
+histCol = histUp ? (histRising ? cUp : color.new(cUp, 55)) :
+     (histRising ? color.new(cDn, 55) : cDn)
+plot(showMacd ? macdHist : na, "MACD histogram", color = histCol,
+     style = plot.style_columns)
+plot(showMacd ? macdLine : na, "MACD line", color = cMacd, linewidth = 2)
+plot(showMacd ? macdSignalLine : na, "MACD signal", color = cSignal, linewidth = 2)
+hline(0, "MACD zero", color = color.new(color.gray, 50))
+
+// ── Agreement readout ───────────────────────────────────────────────────────
+// The same three momentum checks the main indicator counts, so you can see at a
+// glance why its momentum row says 2/3.
+macdBull = macdLine > macdSignalLine and macdHist > macdHist[1]
+macdBear = macdLine < macdSignalLine and macdHist < macdHist[1]
+stochBull = (stochK < stochOS and stochK > stochK[1]) or
+     (stochK > 50 and stochK > stochD and stochK > stochK[1])
+stochBear = (stochK > stochOB and stochK < stochK[1]) or
+     (stochK < 50 and stochK < stochD and stochK < stochK[1])
+rsiBull = rsiVal > 45 and rsiVal > rsiVal[1] and rsiVal < maxRsiChase
+rsiBear = rsiVal < 55 and rsiVal < rsiVal[1] and rsiVal > 100.0 - maxRsiChase
+bullN = (macdBull ? 1 : 0) + (stochBull ? 1 : 0) + (rsiBull ? 1 : 0)
+bearN = (macdBear ? 1 : 0) + (stochBear ? 1 : 0) + (rsiBear ? 1 : 0)
+
+var table t = table.new(position.top_right, 2, 5, border_width = 1)
+
+drawOscTable() =>
+    color hc = bullN > bearN ? cUp : bearN > bullN ? cDn : color.gray
+    table.cell(t, 0, 0, "MOMENTUM", text_color = color.white,
+         bgcolor = color.new(color.black, 10), text_size = size.tiny)
+    table.cell(t, 1, 0, str.tostring(bullN) + " bull / " + str.tostring(bearN) + " bear",
+         text_color = color.white, bgcolor = color.new(hc, 40), text_size = size.tiny)
+    table.cell(t, 0, 1, "RSI", text_color = color.white, text_size = size.tiny)
+    table.cell(t, 1, 1, str.tostring(rsiVal, "#.#") +
+         (rsiBull ? "  ▲" : rsiBear ? "  ▼" : "  –"),
+         text_color = color.white, text_size = size.tiny)
+    table.cell(t, 0, 2, "MACD", text_color = color.white, text_size = size.tiny)
+    table.cell(t, 1, 2, macdBull ? "BULL ▲" : macdBear ? "BEAR ▼" : "flat –",
+         text_color = color.white, text_size = size.tiny)
+    table.cell(t, 0, 3, "Stochastic", text_color = color.white, text_size = size.tiny)
+    table.cell(t, 1, 3, str.tostring(stochK, "#.#") +
+         (stochBull ? "  ▲" : stochBear ? "  ▼" : "  –"),
+         text_color = color.white, text_size = size.tiny)
+    table.cell(t, 0, 4, "Chase guard", text_color = color.white, text_size = size.tiny)
+    table.cell(t, 1, 4, rsiVal >= maxRsiChase ? "TOO HIGH to buy" :
+         rsiVal <= 100.0 - maxRsiChase ? "TOO LOW to sell" : "ok",
+         text_color = color.white, text_size = size.tiny)
+
+if barstate.islast
+    drawOscTable()

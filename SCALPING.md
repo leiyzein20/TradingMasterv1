@@ -163,3 +163,111 @@ means you act at the close of the signal candle.
   widely-used process and refuses low-quality setups. Position sizing, risk per
   trade, and not revenge-trading are still entirely on you — and for a scalper
   they matter more than the entry signal does.
+
+---
+
+# Update: signal table, sizing, Fibonacci, and where the oscillators went
+
+## "I'm not seeing SBS / SSS"
+
+They are in the script — they were just being filtered out, and nothing told you
+why. The panel now has a **`Waiting on`** row that names the *first* gate
+blocking a signal right now, e.g.:
+
+- `HTF bias not aligned (60 + 1D)` — 1H and 1D disagree, so no trade either way
+- `outside killzone` — you are testing outside London/NY hours
+- `no pullback into value` — in trend but price has not come back to the EMA band
+- `too extended (2.31 ATR from EMA)` — the move already ran
+- `momentum only 1/3` — MACD/Stoch/RSI do not agree yet
+- `TP1 only 1.4 pips, need 3.0` — **the most likely one on a 1m chart**
+- `score gate` — everything passed but the score is under your threshold
+
+That last one deserves attention. On a 1m FX chart ATR is often 1.5–2 pips, so a
+1R target can be smaller than the minimum pip filter and **no signal will ever
+fire**. That is the filter doing its job — a 1.4-pip target does not survive the
+spread — but it means 1m is the wrong timeframe for a small account. Move to 5m,
+or lower `Minimum TP1 distance (pips)` if you genuinely have a sub-1-pip spread.
+
+To see signals sooner while learning, relax in this order: **Strong signal
+minimum score** → **Max extension** → **Require BOTH bias timeframes** →
+**Killzones**. Give up the killzone filter last.
+
+## The detail table instead of hovering
+
+**Settings → Colours & Legend → Signal detail table position.** The full
+breakdown of the most recent SBS/SSS now renders as a table (default: middle
+right) — direction, score, how many bars ago, trigger pattern, entry, stop in
+price *and* pips, TP1/TP2, the time stop, and the complete reason list.
+
+It also shows the position sizing: your risk budget in dollars, the lot size,
+the actual dollar risk, and what TP1/TP2 pay at that size.
+
+One limitation worth stating: Pine has **no chart click event**. A script cannot
+know which label you clicked. So the table always shows the *latest* signal.
+Older signals still carry their full tooltip on the label — hover, or
+long-press on mobile.
+
+Set the position to `Off` if you would rather only use tooltips.
+
+## Position sizing for a small account
+
+New **Account & Position Size** group: account size, risk %, contract size,
+broker minimum lot and lot step. Every signal is then costed in real money, and
+the table turns **red with a warning** when your broker's minimum lot forces
+more risk than your budget allows — which on a $50 account happens as soon as
+the stop is wider than about 10 pips.
+
+Full arithmetic and the settings for $50: **[`ACCOUNT_50.md`](ACCOUNT_50.md).**
+
+## Fibonacci
+
+Added as a **location filter**, not decoration. The script takes the last
+confirmed swing leg and computes:
+
+- the **0.5 line** — the discount/premium divider. Below it on an up leg is
+  discount (where you want to buy); above it is premium (where you want to sell).
+- the **golden pocket**, 0.618–0.705 — where reactions cluster.
+
+Longs now require price to be in discount or the golden pocket; shorts require
+premium or the golden pocket. It is a hard gate on SBS/SSS and a scored check in
+the confluence engine, and the panel shows the current zone in the **`Fib zone`**
+row. Turn it off with `Check: Fibonacci discount / premium`.
+
+Only those two levels are drawn. The 0.382/0.786 lines were left out on purpose —
+they add lines without changing a decision.
+
+## BOS / CHoCH clutter
+
+Three fixes:
+
+- Break lines are now **bounded**: each spans the swing it broke plus a short
+  tail, instead of `extend.right` running to the edge of the chart forever. That
+  was what turned the chart into a grid. Turn it off with `Keep BOS / CHoCH lines
+  short` if you prefer the old behaviour.
+- Only the **2 most recent** breaks are kept (`BOS / CHoCH marks kept on chart`).
+- The **supply/demand proxy plots were removed entirely.** They were only
+  `low ± ATR` on bars that happened to touch a level, so they rendered as
+  disconnected dashes rather than zones — pure clutter. Zone work is done
+  properly by the FVG boxes and the S/R steplines.
+
+## Where RSI and MACD are
+
+They are **not chart lines and cannot be**. RSI and Stochastic live on a 0–100
+scale, MACD on a zero-centred one. On a EURUSD price axis around 1.08 they would
+all be a flat line pinned to the bottom of the screen. That is why the main
+indicator reports them as **numbers in the panel**.
+
+To see the actual curves, add the companion script:
+
+**[`candlestick_master_oscillators.pine`](candlestick_master_oscillators.pine)**
+
+Add it to the same chart and it opens in its own pane underneath. It uses the
+same settings and the same colours as the main indicator, so the two always
+agree. Pick what to display with the **Show** input:
+
+- `RSI + Stochastic` — both share the 0–100 scale, so they fit in one pane
+- `MACD` — needs its own scale, so give it a second copy of the script
+
+It also draws your **do-not-chase levels** (RSI 78 / 22 by default) and has a
+momentum table showing the same 2-of-3 count the main panel reports, so when the
+main indicator says `momentum only 1/3` you can see exactly which one is missing.

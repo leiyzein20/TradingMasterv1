@@ -135,9 +135,8 @@ showPanel = input.bool(true, "Show signal panel", group = grpPro)
 showHTF = input.bool(true, "Use higher-timeframe context", group = grpPro)
 showBB = input.bool(true, "Use Bollinger Bands", group = grpPro)
 showSR = input.bool(true, "Show support / resistance", group = grpPro)
-showSD = input.bool(true, "Show supply / demand", group = grpPro)
 showStructure = input.bool(true, "Show BOS / CHOCH", group = grpPro)
-structKeep = input.int(3, "BOS / CHoCH marks kept on chart", group = grpPro,
+structKeep = input.int(2, "BOS / CHoCH marks kept on chart", group = grpPro,
      minval = 1, maxval = 20)
 showRisk = input.bool(true, "Show entry / SL / TP", group = grpPro)
 htfA = input.timeframe("15", "HTF 1 (fast confirmation)", group = grpPro)
@@ -210,8 +209,50 @@ showSignalLevels = input.bool(true, "Draw SL / TP1 / TP2 lines", group = grpScal
 maxSignalDraws = input.int(4, "Signal level sets kept on chart",
      group = grpScalp, minval = 1, maxval = 12)
 
+// ── Account & position size ─────────────────────────────────────────────────
+// A small account is the binding constraint, not the signal quality. These
+// inputs turn every signal's stop distance into an actual lot size and an
+// actual dollar risk, and warn when the broker minimum forces more risk than
+// intended.
+grpRisk = "Account & Position Size"
+acctSize = input.float(50.0, "Account size ($)", group = grpRisk,
+     minval = 1.0, step = 10.0)
+riskPct = input.float(2.0, "Risk per trade (%)", group = grpRisk,
+     minval = 0.1, maxval = 10.0, step = 0.1,
+     tooltip = "Percent of the account risked if the stop is hit. 1-2% is the standard. On a very small account the broker's minimum lot may exceed this - the panel tells you when that happens.")
+contractSize = input.float(100000.0, "Units per 1.00 lot", group = grpRisk,
+     minval = 1.0,
+     tooltip = "100000 for a standard FX lot. Set to 1 for most CFDs and crypto.")
+minLot = input.float(0.01, "Broker minimum lot", group = grpRisk,
+     minval = 0.0001, step = 0.01)
+lotStep = input.float(0.01, "Lot step", group = grpRisk,
+     minval = 0.0001, step = 0.01)
+
+// ── Fibonacci engine ────────────────────────────────────────────────────────
+// Retracement of the last confirmed swing leg. Used as a location filter:
+// longs are preferred in discount (below the 50% of an up leg), shorts in
+// premium, and the 0.618-0.705 "golden pocket" is the premium entry area.
+grpFib = "Fibonacci Engine"
+useFib = input.bool(true, "Check: Fibonacci discount / premium", group = grpFib)
+showFib = input.bool(true, "Draw Fibonacci levels", group = grpFib)
+fibGoldenLo = input.float(0.618, "Golden pocket start", group = grpFib,
+     minval = 0.3, maxval = 0.9, step = 0.001)
+fibGoldenHi = input.float(0.705, "Golden pocket end", group = grpFib,
+     minval = 0.3, maxval = 0.95, step = 0.001)
+cFib = input.color(#B39DDB, "Fibonacci level colour", group = grpFib)
+cFibGold = input.color(#FFC107, "Golden pocket colour", group = grpFib)
+
 // ── Colours & legend ────────────────────────────────────────────────────────
 grpCol = "Colours & Legend"
+sigTablePos = input.string("Middle right", "Signal detail table position",
+     group = grpCol,
+     options = ["Middle right", "Top right", "Bottom right", "Middle left",
+     "Bottom left", "Off"],
+     tooltip = "Shows the most recent SBS/SSS breakdown as a table, so you do not have to hover the label.")
+boundBosLines = input.bool(true, "Keep BOS / CHoCH lines short", group = grpCol,
+     tooltip = "ON draws the break line only across the swing it broke. OFF extends it to the right edge, which gets messy quickly.")
+bosLinePad = input.int(6, "BOS / CHoCH line extension (bars)", group = grpCol,
+     minval = 0, maxval = 100)
 showLegend = input.bool(true, "Show colour legend", group = grpCol)
 showScalpMAs = input.bool(true, "Plot fast / mid / slow EMAs", group = grpCol)
 showVwapLine = input.bool(true, "Plot VWAP", group = grpCol)
@@ -316,15 +357,22 @@ ph = ta.pivothigh(high, pivLen, pivLen)
 
 var float swingHigh = na
 var float swingLow = na
+var int swingHighBar = na
+var int swingLowBar = na
 var bool swingHighLive = false
 var bool swingLowLive = false
 var int structDir = 0
 
+// A confirmed pivot is reported pivLen bars after it happened, so that is where
+// the swing actually sits. Knowing the bar lets break lines be drawn across the
+// swing they broke instead of extending to the right edge forever.
 if not na(ph)
     swingHigh := ph
+    swingHighBar := bar_index - pivLen
     swingHighLive := true
 if not na(pl)
     swingLow := pl
+    swingLowBar := bar_index - pivLen
     swingLowLive := true
 
 bullBOSEvent = swingHighLive and not na(swingHigh) and close > swingHigh
@@ -416,6 +464,37 @@ nearRes = resTouches > 0
 
 bullStructure = bullBOSEvent or structDir == 1 or (upTrend and close > emaFast)
 bearStructure = bearBOSEvent or structDir == -1 or (downTrend and close < emaFast)
+
+// ═══════════════════════════ FIBONACCI ENGINE ═══════════════════════════════
+// Retracement of the last confirmed swing leg. The point is not the lines: it
+// is discount vs premium. Buying in the lower half of an up leg and selling in
+// the upper half of a down leg is the whole edge of the tool, and the
+// 0.618-0.705 golden pocket is where reactions cluster.
+
+// Only the 50% divider and the golden pocket are drawn. The 0.382/0.786 lines
+// are decoration and were making the chart harder to read, not easier.
+fibState() =>
+    bool ok = not na(swingHigh) and not na(swingLow) and swingHigh > swingLow and
+         not na(swingHighBar) and not na(swingLowBar)
+    float legRange = ok ? swingHigh - swingLow : na
+    // Whichever swing confirmed more recently is the end of the current leg.
+    bool up = ok and swingHighBar >= swingLowBar
+    float anchor = up ? swingHigh : swingLow
+    float dirF = up ? -1.0 : 1.0
+    float l500 = ok ? anchor + dirF * legRange * 0.5 : na
+    float ga = ok ? anchor + dirF * legRange * fibGoldenLo : na
+    float gb = ok ? anchor + dirF * legRange * fibGoldenHi : na
+    [ok, l500, ok ? math.max(ga, gb) : na, ok ? math.min(ga, gb) : na]
+
+[fibValid, fib500, fibGoldTop, fibGoldBot] = fibState()
+inGolden = fibValid and close <= fibGoldTop and close >= fibGoldBot
+// Discount = below the 50% of the leg, premium = above it.
+inDiscount = fibValid and close < fib500
+inPremium = fibValid and close > fib500
+fibLongOk = not useFib or not fibValid or inDiscount or inGolden
+fibShortOk = not useFib or not fibValid or inPremium or inGolden
+fibZoneTxt = not fibValid ? "n/a" : inGolden ? "GOLDEN POCKET" :
+     inDiscount ? "DISCOUNT" : "PREMIUM"
 
 // ADX / DMI. Every ta.* call is evaluated unconditionally: a ta function placed
 // inside a ternary branch or an if block is only advanced on the bars where the
@@ -651,14 +730,10 @@ htfBias = htfActive == 0 ? "N/A" :
      htfBullCount > htfBearCount ? "BULLISH" :
      htfBearCount > htfBullCount ? "BEARISH" : "MIXED"
 
-// Supply / demand proxy zones anchored on confirmed S/R interaction.
-sdTol = atrV * math.max(zoneMult, 0.25)
-demandZone = nearSup
-supplyZone = nearRes
-demandLow = demandZone ? low - sdTol * 0.25 : na
-demandHigh = demandZone ? low + sdTol : na
-supplyLow = supplyZone ? high - sdTol : na
-supplyHigh = supplyZone ? high + sdTol * 0.25 : na
+// The old supply/demand proxy plots were removed. They were only `low ± ATR`
+// on bars that happened to touch a level, so they rendered as disconnected
+// dashes rather than zones - clutter without information. Real zone work is
+// done by the FVG boxes and the S/R steplines.
 
 // ═════════════════════════════ VALIDATION ENGINE ════════════════════════════
 
@@ -800,6 +875,22 @@ riskShort = math.max((microHigh + atrV * slBufferATR) - close, atrV * slFloorMul
 tgtOkLong = riskLong * sigRR1 >= minTargetPips * pipSize
 tgtOkShort = riskShort * sigRR1 >= minTargetPips * pipSize
 
+// ── Position sizing ─────────────────────────────────────────────────────────
+// Turns a stop distance into a lot size for the configured account. Assumes the
+// quote currency is the account currency (true for EURUSD/GBPUSD on a USD
+// account); on a cross, multiply by the quote-to-USD rate yourself.
+riskDollars = acctSize * riskPct / 100.0
+pipValuePerLot = pipSize * contractSize
+lotsFor(float riskPrice) =>
+    float stopPips = pipSize > 0 ? riskPrice / pipSize : na
+    float raw = stopPips > 0 and pipValuePerLot > 0 ?
+         riskDollars / (stopPips * pipValuePerLot) : na
+    float stepped = na(raw) ? na : math.floor(raw / lotStep) * lotStep
+    na(stepped) ? na : math.max(stepped, minLot)
+riskDollarsAt(float riskPrice, float lots) =>
+    float stopPips = pipSize > 0 ? riskPrice / pipSize : na
+    na(stopPips) or na(lots) ? na : stopPips * lots * pipValuePerLot
+
 // Scalp setup quality, 0-100, independent of the pattern confluence score.
 scalpQuality(int dir) =>
     bool bull = dir == 1
@@ -844,10 +935,34 @@ scalpReasons(int dir) =>
     s += "• Regime: " + regime + " | ADX " +
          (adxAvailable ? str.tostring(adxVal, "#.#") : "n/a") + " | ATR " +
          str.tostring(atrPct, "#.##") + "%\n"
+    s += (bull ? fibLongOk : fibShortOk) ?
+         "• Fibonacci: " + fibZoneTxt + " - correct side of the swing leg ✓\n" :
+         "• Fibonacci: " + fibZoneTxt + " - wrong side of the swing leg ✗\n"
     s += (bull ? tgtOkLong : tgtOkShort) ?
          "• Target size: TP1 clears the spread filter ✓" :
          "• Target size: TP1 below the minimum pip filter ✗"
     s
+
+// Names the FIRST gate that is blocking a signal, so it is obvious why nothing
+// is firing instead of having to guess.
+signalBlocker(int dir) =>
+    bool bull = dir == 1
+    string r = not (bull ? biasBull : biasBear) ?
+         "HTF bias not aligned (" + htfB + " + " + htfC + ")" :
+         not sessionOk ? "outside killzone" :
+         (avoidChop and strongChop) ? "chop filter active" :
+         not (bull ? pullbackLong : pullbackShort) ? "no pullback into value" :
+         not notExtended ? "too extended (" + str.tostring(extFromEma, "#.##") + " ATR from EMA)" :
+         not (bull ? bullEntryTrigger : bearEntryTrigger) ? "no trigger candle or pattern" :
+         (bull ? momBullCount : momBearCount) < 2 ?
+         "momentum only " + str.tostring(bull ? momBullCount : momBearCount) + "/3" :
+         not (bull ? structDir >= 0 : structDir <= 0) ? "structure against the trade" :
+         not (bull ? fibLongOk : fibShortOk) ? "wrong side of the Fib leg (" + fibZoneTxt + ")" :
+         not (bull ? tgtOkLong : tgtOkShort) ?
+         "TP1 only " + str.tostring((bull ? riskLong : riskShort) * sigRR1 / pipSize, "#.#") +
+         " pips, need " + str.tostring(minTargetPips, "#.#") :
+         "score gate"
+    r
 
 // ═══════════════════════════ CONFLUENCE ENGINE ══════════════════════════════
 // Family weighting. A family contributes its full weight only when every
@@ -946,6 +1061,9 @@ confluenceScore(int dir, int relPct, float riskUnit) =>
     if useFVG
         locTotal += 1
         locPass += fvgOk ? 1 : 0
+    if useFib and fibValid
+        locTotal += 1
+        locPass += (bull ? (inDiscount or inGolden) : (inPremium or inGolden)) ? 1 : 0
     if showBB
         locTotal += 1
         locPass += bbOk ? 1 : 0
@@ -1050,6 +1168,10 @@ confluenceText(int dir, float riskUnit) =>
          "ADX: Strength not confirmed ✗ (" + str.tostring(adxVal, "#.#") + ")"
     string bbTxt = bbOk ? "Bollinger: directional location ✓" :
          bbSqueeze ? "Bollinger: squeeze ✗" : "Bollinger: neutral ✗"
+    bool fibOk = bull ? (inDiscount or inGolden) : (inPremium or inGolden)
+    string fibTxt = not fibValid ? "Fibonacci: no clean swing leg yet" :
+         fibOk ? "Fibonacci: " + fibZoneTxt + " - correct side of the leg ✓" :
+         "Fibonacci: " + fibZoneTxt + " - wrong side of the leg ✗"
     string htfTxt = htfActive == 0 ? "HTF: n/a on this chart timeframe" :
          htfOk ? "HTF: " + htfBias + " alignment ✓ (" +
          str.tostring(bull ? htfBullCount : htfBearCount) + "/" +
@@ -1065,6 +1187,7 @@ confluenceText(int dir, float riskUnit) =>
      (useEMA ? emaTxt + "\n" : "") +
      (useVol ? volTxt + "\n" : "") +
      (useFVG ? fvgTxt + "\n" : "") +
+     (useFib ? fibTxt + "\n" : "") +
      (useADX ? adxTxt + "\n" : "") +
      (showBB ? bbTxt + "\n" : "") +
      (showHTF ? htfTxt + "\n" : "") +
@@ -2019,11 +2142,11 @@ cooldownOk = bar_index - lastSigBar >= signalCooldown
 
 sbsRaw = confirmed and showSignals and biasBull and sessionOk and
      not (avoidChop and strongChop) and pullbackLong and notExtended and
-     bullEntryTrigger and momBullCount >= 2 and structDir >= 0 and
+     bullEntryTrigger and momBullCount >= 2 and structDir >= 0 and fibLongOk and
      tgtOkLong and rsiVal < maxRsiChase and cooldownOk
 sssRaw = confirmed and showSignals and biasBear and sessionOk and
      not (avoidChop and strongChop) and pullbackShort and notExtended and
-     bearEntryTrigger and momBearCount >= 2 and structDir <= 0 and
+     bearEntryTrigger and momBearCount >= 2 and structDir <= 0 and fibShortOk and
      tgtOkShort and rsiVal > 100.0 - maxRsiChase and cooldownOk
 
 sbsSignal = sbsRaw and sbsScoreVal >= sbsMin and not sssRaw
@@ -2046,6 +2169,27 @@ type Trade
     label lb
 
 var array<Trade> trades = array.new<Trade>()
+
+// The most recent signal, kept so the detail table can render it without the
+// user hovering anything. It lives in a one-element array because a Pine
+// function cannot reassign a global, but it can mutate an object it reaches
+// through one. Only the latest signal can be shown this way - Pine has no
+// chart click event, so older signals keep their label tooltips.
+type SigInfo
+    int bar
+    int dir
+    int score
+    string pat
+    string pname
+    float entry
+    float stop
+    float tp1
+    float tp2
+    string why
+
+var array<SigInfo> lastSig = array.new<SigInfo>()
+if barstate.isfirst
+    array.push(lastSig, SigInfo.new(na, 0, 0, "", "", na, na, na, na, ""))
 
 signalTooltip(int dir, int score, string abbr, string pname, int relPct, float entry, float sl, float tp1, float tp2) =>
     string head = (dir == 1 ? "STRONG BUY SIGNAL (SBS)" : "STRONG SELL SIGNAL (SSS)") +
@@ -2092,6 +2236,18 @@ drawSignal(int dir, int score, string abbr, string pname, int relPct, float entr
              color = color.new(cBosUp, 10), style = line.style_dashed, width = 2)
         t2l := line.new(bar_index, tp2, rt, tp2, xloc = xloc.bar_index,
              color = color.new(cBosUp, 45), style = line.style_dotted, width = 2)
+    if array.size(lastSig) > 0
+        SigInfo s = array.get(lastSig, 0)
+        s.bar := bar_index
+        s.dir := dir
+        s.score := score
+        s.pat := abbr
+        s.pname := pname
+        s.entry := entry
+        s.stop := sl
+        s.tp1 := tp1
+        s.tp2 := tp2
+        s.why := scalpReasons(dir)
     array.push(trades, Trade.new(sll, t1l, t2l, el, lb))
     if array.size(trades) > maxSignalDraws
         Trade old = array.shift(trades)
@@ -2146,20 +2302,21 @@ alertcondition(sbsSignal, "SBS - Strong Buy Signal",
 alertcondition(sssSignal, "SSS - Strong Sell Signal",
      "SSS strong sell: HTF bias + pullback + trigger + momentum aligned.")
 
+sigAlertMsg(int dir, int score, float e, float sl, float t1, float t2) =>
+    float lots = lotsFor(math.abs(e - sl))
+    (dir == 1 ? "SBS BUY " : "SSS SELL ") + syminfo.ticker + " " +
+     timeframe.period + " · score " + str.tostring(score) + "% · entry " +
+     str.tostring(e, format.mintick) + " · SL " + str.tostring(sl, format.mintick) +
+     " (" + str.tostring(math.abs(e - sl) / pipSize, "#.#") + " pips) · TP1 " +
+     str.tostring(t1, format.mintick) + " · TP2 " + str.tostring(t2, format.mintick) +
+     " · size " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot")
+
 if sbsSignal and fireAlerts
-    alert("SBS BUY " + syminfo.ticker + " " + timeframe.period + " · score " +
-         str.tostring(sbsScoreVal) + "% · entry " +
-         str.tostring(sigEntry, format.mintick) + " · SL " +
-         str.tostring(sbsSL, format.mintick) + " · TP1 " +
-         str.tostring(sbsTP1, format.mintick) + " · TP2 " +
-         str.tostring(sbsTP2, format.mintick), alert.freq_once_per_bar_close)
+    alert(sigAlertMsg(1, sbsScoreVal, sigEntry, sbsSL, sbsTP1, sbsTP2),
+         alert.freq_once_per_bar_close)
 if sssSignal and fireAlerts
-    alert("SSS SELL " + syminfo.ticker + " " + timeframe.period + " · score " +
-         str.tostring(sssScoreVal) + "% · entry " +
-         str.tostring(sigEntry, format.mintick) + " · SL " +
-         str.tostring(sssSL, format.mintick) + " · TP1 " +
-         str.tostring(sssTP1, format.mintick) + " · TP2 " +
-         str.tostring(sssTP2, format.mintick), alert.freq_once_per_bar_close)
+    alert(sigAlertMsg(-1, sssScoreVal, sigEntry, sssSL, sssTP1, sssTP2),
+         alert.freq_once_per_bar_close)
 
 // ═════════════════════════ DISPLAY / STRUCTURE OBJECTS ═════════════════════
 
@@ -2184,11 +2341,15 @@ chochTipBear = "CHoCH ▼  Change of Character (bearish)\nFirst confirmed bearis
 // plain arrow, CHoCH a dashed line, its own colour and the word CHoCH, because
 // they mean different things. BOS = the trend already running pushed through a
 // swing (continuation). CHoCH = the first break the other way (trend flip).
-drawBreak(int dir, float lvl, bool isChoch) =>
+drawBreak(int dir, float lvl, int fromBar, bool isChoch) =>
     color c = dir == 1 ? (isChoch ? cChochUp : cBosUp) :
          (isChoch ? cChochDn : cBosDn)
-    line ln = line.new(bar_index - 1, lvl, bar_index, lvl,
-         xloc = xloc.bar_index, extend = extend.right,
+    // Bounded by default: the line spans the swing it broke plus a short tail.
+    // extend.right on every break is what turned the chart into a grid.
+    int lx = boundBosLines and not na(fromBar) ? fromBar : bar_index - 1
+    line ln = line.new(lx, lvl, bar_index + (boundBosLines ? bosLinePad : 0), lvl,
+         xloc = xloc.bar_index,
+         extend = boundBosLines ? extend.none : extend.right,
          color = color.new(c, 15),
          style = isChoch ? line.style_dashed : line.style_solid, width = 2)
     string txt = isChoch ? (dir == 1 ? "CHoCH ▲" : "CHoCH ▼") :
@@ -2209,10 +2370,10 @@ drawBreak(int dir, float lvl, bool isChoch) =>
         label.delete(array.shift(structLabels))
 
 if drawStructure and bullBOSEvent
-    drawBreak(1, brokenSwingHigh, bullCHOCH)
+    drawBreak(1, brokenSwingHigh, swingHighBar, bullCHOCH)
 
 if drawStructure and bearBOSEvent
-    drawBreak(-1, brokenSwingLow, bearCHOCH)
+    drawBreak(-1, brokenSwingLow, swingLowBar, bearCHOCH)
 
 // Every line has its own colour AND its own style, so it is identifiable both
 // on the chart and in the TradingView status line. Names match the legend.
@@ -2233,25 +2394,25 @@ plot(showScalpMAs ? emaSlow : na, "⑤ Slow EMA 50 — grey",
 plot(showVwapLine and vwapAvailable ? vwapVal : na, "⑥ VWAP — cyan thick",
      color = cVwap, linewidth = 3)
 
+fg1 = plot(showFib and fibValid ? fibGoldTop : na, "⑨ Fib golden pocket top",
+     color = color.new(cFibGold, 40), style = plot.style_linebr, linewidth = 1)
+fg2 = plot(showFib and fibValid ? fibGoldBot : na, "⑨ Fib golden pocket bottom",
+     color = color.new(cFibGold, 40), style = plot.style_linebr, linewidth = 1)
+fill(fg1, fg2, color = color.new(cFibGold, 88), title = "Fib golden pocket")
+plot(showFib and fibValid ? fib500 : na, "⑩ Fib 0.5 — discount / premium line",
+     color = color.new(cFib, 25), style = plot.style_linebr, linewidth = 2)
+
 plot(showSR ? recentSupport : na, "⑦ Support — green steps",
      color = color.new(cSupport, 25), style = plot.style_stepline, linewidth = 2)
 plot(showSR ? recentResistance : na, "⑧ Resistance — red steps",
      color = color.new(cResist, 25), style = plot.style_stepline, linewidth = 2)
 
-plot(showSD and demandZone ? demandLow : na, "Demand low",
-     color = color.new(cSupport, 80), style = plot.style_linebr)
-plot(showSD and demandZone ? demandHigh : na, "Demand high",
-     color = color.new(cSupport, 80), style = plot.style_linebr)
-plot(showSD and supplyZone ? supplyLow : na, "Supply low",
-     color = color.new(cResist, 80), style = plot.style_linebr)
-plot(showSD and supplyZone ? supplyHigh : na, "Supply high",
-     color = color.new(cResist, 80), style = plot.style_linebr)
 
 // ═════════════════════════════════ DASHBOARD ════════════════════════════════
 // Pine exposes no chart click events, so per-signal detail lives in each
 // label's tooltip. The panel shows the live confluence read for both sides.
 
-var table dash = table.new(position.top_right, 2, 18, border_width = 1)
+var table dash = table.new(position.top_right, 2, 21, border_width = 1)
 
 // Panel values are resolved at global scope to keep the if body short.
 liveScore = math.max(liveBullScore, liveBearScore)
@@ -2268,7 +2429,19 @@ scalpStateTxt = not sessionOk ? "OUT OF KILLZONE" :
 sbsSssTxt = "SBS " + str.tostring(sbsScoreVal) + "% / SSS " +
      str.tostring(sssScoreVal) + "%"
 killzoneTxt = not useSession ? "filter off" :
+     not timeframe.isintraday ? "n/a (not intraday)" :
      inSessA ? "LONDON ✓" : inSessB ? "NEW YORK ✓" : "closed ✗"
+// The single most useful line on the panel: why no signal right now.
+blockerTxt = sbsSignal ? "SBS FIRED" : sssSignal ? "SSS FIRED" :
+     biasBull ? signalBlocker(1) : biasBear ? signalBlocker(-1) :
+     "HTF bias not aligned (" + htfB + " + " + htfC + ")"
+// Live sizing preview for the direction currently in bias.
+prevRisk = biasBear ? riskShort : riskLong
+prevLots = lotsFor(prevRisk)
+prevCash = riskDollarsAt(prevRisk, prevLots)
+sizeTxt = na(prevLots) ? "n/a" : str.tostring(prevLots, "#.####") + " lot  ·  $" +
+     str.tostring(prevCash, "#.##") + "  ·  " +
+     str.tostring(prevRisk / pipSize, "#.#") + " pips"
 dashColor = dashSignal == "BUY BIAS" ? colBull :
      dashSignal == "SELL BIAS" ? colBear :
      dashSignal == "CHOP" or dashSignal == "NO BIAS" ? colNeut : color.orange
@@ -2329,15 +2502,109 @@ drawDashboard() =>
     table.cell(dash, 1, 16, killzoneTxt, text_color = color.white)
     table.cell(dash, 0, 17, "SBS / SSS", text_color = color.white)
     table.cell(dash, 1, 17, sbsSssTxt, text_color = color.white)
+    table.cell(dash, 0, 18, "Waiting on", text_color = color.white)
+    table.cell(dash, 1, 18, blockerTxt, text_color = color.white,
+         bgcolor = color.new(sbsSignal or sssSignal ? colBull : color.orange, 60))
+    table.cell(dash, 0, 19, "Fib zone", text_color = color.white)
+    table.cell(dash, 1, 19, fibZoneTxt, text_color = color.white)
+    table.cell(dash, 0, 20, "Size now", text_color = color.white)
+    table.cell(dash, 1, 20, sizeTxt, text_color = color.white)
 
 if barstate.islast and showPanel
     drawDashboard()
+// ═══════════════════════════ SIGNAL DETAIL TABLE ════════════════════════════
+// The label tooltip content, rendered as a table instead, so nothing has to be
+// hovered. It always shows the MOST RECENT signal.
+
+sigTblPos = sigTablePos == "Top right" ? position.top_right :
+     sigTablePos == "Bottom right" ? position.bottom_right :
+     sigTablePos == "Middle left" ? position.middle_left :
+     sigTablePos == "Bottom left" ? position.bottom_left : position.middle_right
+var table sigTbl = table.new(sigTblPos, 2, 16, border_width = 1)
+
+sigRow(int r, string k, string v, color bg) =>
+    table.cell(sigTbl, 0, r, k, text_color = color.white,
+         text_size = size.tiny, text_halign = text.align_left)
+    table.cell(sigTbl, 1, r, v, text_color = color.white, bgcolor = bg,
+         text_size = size.tiny, text_halign = text.align_left)
+
+drawSignalTable() =>
+    SigInfo g = array.get(lastSig, 0)
+    int sigBar = g.bar
+    int sigDir = g.dir
+    int sigScore = g.score
+    string sigPat = g.pat
+    string sigPatName = g.pname
+    float sigE = g.entry
+    float sigStop = g.stop
+    float sigT1 = g.tp1
+    float sigT2 = g.tp2
+    string sigWhy = g.why
+    color head = sigDir == 1 ? colBull : colBear
+    float rk = math.abs(sigE - sigStop)
+    float stopPips = pipSize > 0 ? rk / pipSize : na
+    float lots = lotsFor(rk)
+    float dollarRisk = riskDollarsAt(rk, lots)
+    float tp1Pips = pipSize > 0 ? math.abs(sigT1 - sigE) / pipSize : na
+    float tp1Cash = na(lots) ? na : tp1Pips * lots * pipValuePerLot
+    float tp2Cash = na(lots) ? na : math.abs(sigT2 - sigE) / pipSize * lots * pipValuePerLot
+    bool overRisk = not na(dollarRisk) and dollarRisk > riskDollars * 1.05
+    int age = bar_index - sigBar
+    table.cell(sigTbl, 0, 0, sigDir == 1 ? "SBS  BUY" : "SSS  SELL",
+         text_color = color.white, bgcolor = head, text_size = size.small)
+    table.cell(sigTbl, 1, 0, str.tostring(sigScore) + "%  ·  " +
+         str.tostring(age) + " bars ago",
+         text_color = color.white, bgcolor = head, text_size = size.small)
+    sigRow(1, "Trigger", sigPat == "" ? "momentum candle" : sigPat + " " + sigPatName,
+         color.new(color.black, 60))
+    sigRow(2, "Entry", str.tostring(sigE, format.mintick), color.new(color.gray, 60))
+    sigRow(3, "Stop loss", str.tostring(sigStop, format.mintick) + "   (" +
+         str.tostring(stopPips, "#.#") + " pips)", color.new(cBosDn, 60))
+    sigRow(4, "Take profit 1", str.tostring(sigT1, format.mintick) + "   (" +
+         str.tostring(tp1Pips, "#.#") + " pips)", color.new(cBosUp, 60))
+    sigRow(5, "Take profit 2", str.tostring(sigT2, format.mintick),
+         color.new(cBosUp, 75))
+    sigRow(6, "Time stop", str.tostring(maxHoldBars) + " bars from entry",
+         color.new(color.black, 60))
+    sigRow(7, "── SIZE FOR $" + str.tostring(acctSize, "#") + " ──", "",
+         color.new(color.black, 40))
+    sigRow(8, "Risk budget", str.tostring(riskPct, "#.#") + "%  =  $" +
+         str.tostring(riskDollars, "#.##"), color.new(color.black, 60))
+    sigRow(9, "Lot size", na(lots) ? "n/a" : str.tostring(lots, "#.####"),
+         color.new(color.black, 60))
+    sigRow(10, "Actual $ risk", na(dollarRisk) ? "n/a" : "$" +
+         str.tostring(dollarRisk, "#.##"),
+         overRisk ? color.new(cBosDn, 40) : color.new(color.black, 60))
+    sigRow(11, "If TP1 hits", na(tp1Cash) ? "n/a" : "+$" + str.tostring(tp1Cash, "#.##"),
+         color.new(cBosUp, 65))
+    sigRow(12, "If TP2 hits", na(tp2Cash) ? "n/a" : "+$" + str.tostring(tp2Cash, "#.##"),
+         color.new(cBosUp, 75))
+    sigRow(13, overRisk ? "⚠ WARNING" : "Sizing", overRisk ?
+         "Broker minimum lot forces more risk than your " +
+         str.tostring(riskPct, "#.#") + "% budget. Widen the stop, use a smaller minimum lot, or skip." :
+         "Within your risk budget",
+         overRisk ? color.new(cBosDn, 30) : color.new(color.black, 60))
+    table.cell(sigTbl, 0, 14, "Why", text_color = color.white,
+         text_size = size.tiny, text_halign = text.align_left)
+    table.cell(sigTbl, 1, 14, sigWhy, text_color = color.white,
+         text_size = size.tiny, text_halign = text.align_left,
+         bgcolor = color.new(color.black, 60))
+    table.cell(sigTbl, 0, 15, "Note", text_color = color.white, text_size = size.tiny)
+    table.cell(sigTbl, 1, 15,
+         "Score = confluence quality, NOT a win rate. Sizing assumes the quote currency is your account currency.",
+         text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left, bgcolor = color.new(color.black, 60))
+
+haveSignal = array.size(lastSig) > 0 and not na(array.get(lastSig, 0).bar)
+if barstate.islast and sigTablePos != "Off" and haveSignal
+    drawSignalTable()
+
 // ═════════════════════════════════ LEGEND ═══════════════════════════════════
 // A colour swatch per drawn object. RSI / MACD / Stochastic / ADX are
 // oscillators and cannot be plotted on a price scale meaningfully, so they are
 // read as numbers in the panel above - the legend says so explicitly.
 
-var table legend = table.new(position.bottom_right, 2, 14, border_width = 1)
+var table legend = table.new(position.bottom_left, 2, 16, border_width = 1)
 
 legendRow(int row, string name, color swatch, string note) =>
     table.cell(legend, 0, row, "", bgcolor = swatch, width = 1)
@@ -2375,7 +2642,11 @@ drawLegend() =>
          "Fair Value Gaps: teal box = bullish imbalance below price, red box = bearish imbalance above. Only quality-filtered gaps are drawn.")
     legendRow(12, "SBS ▲ / SSS ▼", colBull,
          "Strong Buy / Strong Sell signal. Hover the label for the full reason, score, entry, stop and targets. Dashed red line = stop, dashed green = TP1, dotted green = TP2.")
-    legendRow(13, "RSI / MACD / Stoch / ADX", color.new(color.gray, 30),
+    legendRow(13, "⑨ Fib golden pocket", cFibGold,
+         "0.618-0.705 retracement of the last confirmed swing leg. The area where reactions cluster.")
+    legendRow(14, "⑩ Fib 0.382 / 0.5 / 0.786", cFib,
+         "The 0.5 line is the discount/premium divider: below it on an up leg is discount (buy area), above it is premium (sell area).")
+    legendRow(15, "RSI / MACD / Stoch / ADX", color.new(color.gray, 30),
          "These are oscillators - they have no meaningful place on a price scale, so they are shown as live numbers in the panel at the top right instead of as chart lines. Add TradingView's own RSI/MACD panes below the chart if you want the curves.")
 
 if barstate.islast and showLegend
