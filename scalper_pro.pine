@@ -37,6 +37,22 @@ indicator("Scalper Pro", "ScalpPro", overlay = true,
 
 // ════════════════════════════════ INPUTS ════════════════════════════════════
 
+// Everything downstream — stops, targets, the spread filter and above all the
+// position size — is denominated in pips, so the pip size and the contract size
+// must be right for the instrument. They differ enormously:
+//   EURUSD  1 lot = 100,000 units,  pip 0.0001  →  $10 per pip per lot
+//   XAUUSD  1 lot = 100 ounces,     pip 0.10    →  $10 per pip per lot
+// Getting gold wrong by assuming forex contract size is a 1000x sizing error.
+gIN = "0  Instrument"
+instPreset = input.string("Auto detect", "Instrument", group = gIN,
+     options = ["Auto detect", "Forex", "Gold XAUUSD", "Silver XAGUSD",
+     "Index / Crypto", "Custom"],
+     tooltip = "Auto detect reads the ticker. Verify the resolved pip size and $/pip on the panel against your broker before trading.")
+customPip = input.float(0.10, "Custom: pip size in price", group = gIN,
+     minval = 0.00001, step = 0.00001)
+customLot = input.float(100.0, "Custom: units per 1.00 lot", group = gIN,
+     minval = 0.01)
+
 gTF = "1  Timeframes"
 tfMacro = input.timeframe("1D", "Macro bias", group = gTF)
 tfDir = input.timeframe("60", "Direction bias", group = gTF)
@@ -76,12 +92,11 @@ gRK = "5  Risk & account"
 acctSize = input.float(60.0, "Account size ($)", group = gRK, minval = 1, step = 10)
 riskPct = input.float(1.5, "Risk per trade (%)", group = gRK,
      minval = 0.1, maxval = 5.0, step = 0.1)
-spreadPips = input.float(1.5, "Your typical spread (pips)", group = gRK,
+spreadPips = input.float(2.0, "Your typical spread (pips)", group = gRK,
      minval = 0.0, step = 0.1,
-     tooltip = "Used for the stop buffer and the minimum-target test. Check it on your broker.")
+     tooltip = "In the pip unit shown on the panel. EURUSD ~1.0-1.5. XAUUSD ~2.0-3.5 (i.e. 20-35 cents). Check yours.")
 minTpSpread = input.float(3.0, "Minimum TP1 = spread x", group = gRK,
      minval = 1.0, step = 0.5)
-contractSize = input.float(100000.0, "Units per 1.00 lot", group = gRK, minval = 1)
 minLot = input.float(0.01, "Broker minimum lot", group = gRK, minval = 0.0001)
 rr1 = input.float(1.0, "TP1 (R)", group = gRK, minval = 0.5, step = 0.25)
 maxR = input.float(3.0, "Cap TP2 at (R)", group = gRK, minval = 1.0, step = 0.5)
@@ -159,7 +174,23 @@ cumV += nz(volume)
 vwap = cumV > 0 ? cumPV / cumV : na
 vwapOk = timeframe.isintraday and not na(vwap)
 
-pipSize = syminfo.type == "forex" ? syminfo.mintick * 10.0 : syminfo.mintick
+// syminfo.type alone is not enough: most feeds report XAUUSD as "cfd", some as
+// "forex", so a type-only test silently produces a different pip on different
+// brokers. The preset resolves it explicitly and the panel shows the result.
+tickUp = str.upper(syminfo.ticker)
+autoGold = str.contains(tickUp, "XAU") or str.contains(tickUp, "GOLD")
+autoSilver = str.contains(tickUp, "XAG") or str.contains(tickUp, "SILVER")
+autoFx = syminfo.type == "forex" and not autoGold and not autoSilver
+isGold = instPreset == "Gold XAUUSD" or (instPreset == "Auto detect" and autoGold)
+isSilver = instPreset == "Silver XAGUSD" or (instPreset == "Auto detect" and autoSilver)
+isFx = instPreset == "Forex" or (instPreset == "Auto detect" and autoFx)
+isCustom = instPreset == "Custom"
+pipSize = isCustom ? customPip : isGold ? 0.10 : isSilver ? 0.001 :
+     isFx ? syminfo.mintick * 10.0 : syminfo.mintick
+contractSize = isCustom ? customLot : isGold ? 100.0 : isSilver ? 5000.0 :
+     isFx ? 100000.0 : 1.0
+instName = isGold ? "GOLD" : isSilver ? "SILVER" : isFx ? "FOREX" :
+     isCustom ? "CUSTOM" : "INDEX/CRYPTO"
 atrPips = atr / pipSize
 
 inSessA = not na(time(timeframe.period, sessA, sessTz))
@@ -692,7 +723,7 @@ if sigLong or sigShort
 
 // ════════════════════════════════ PANEL ═════════════════════════════════════
 
-var table pnl = table.new(position.top_right, 2, 16, border_width = 1)
+var table pnl = table.new(position.top_right, 2, 17, border_width = 1)
 
 pr(int r, string k, string v, color bg) =>
     table.cell(pnl, 0, r, k, text_color = color.white, text_size = size.tiny,
@@ -741,7 +772,11 @@ drawPanel() =>
          tooBig ? color.new(cBear, 35) : none)
     pr(14, "Max stop", na(maxStopPips) ? "n/a" :
          str.tostring(maxStopPips, "#.#") + " pips at " + str.tostring(minLot) + " lot", none)
-    pr(15, "Trade", tradeState, none)
+    // Verify this row against your broker before trusting any size on screen.
+    pr(15, "Instrument", instName + "  ·  pip " + str.tostring(pipSize) + "  ·  $" +
+         str.tostring(pipSize * contractSize * minLot, "#.###") + "/pip at " +
+         str.tostring(minLot) + " lot", none)
+    pr(16, "Trade", tradeState, none)
 
 if barstate.islast and showPanel
     drawPanel()

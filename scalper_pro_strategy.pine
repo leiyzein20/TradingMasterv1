@@ -23,10 +23,16 @@
 //   all higher-timeframe data uses the expr[1] + lookahead_on idiom.
 // ═════════════════════════════════════════════════════════════════════════════
 
-// default_qty_value = 1000 units = 0.01 lot, the size you would actually trade.
-// commission_value is cash per ORDER: for 1000 units of EURUSD at a 1.5 pip
-// spread the round trip costs 1000 x 0.00015 = $0.15, so $0.075 per side.
-// EDIT BOTH to match your broker and pair before trusting any result.
+// SET THESE TWO FOR YOUR INSTRUMENT — they cannot be inputs in a strategy()
+// declaration, and leaving them wrong makes every result meaningless.
+//
+//   EURUSD 0.01 lot  → default_qty_value = 1000   (units)
+//                      commission_value  = 0.075  (1.5 pip spread, per side)
+//   XAUUSD 0.01 lot  → default_qty_value = 1      (1 ounce)
+//                      commission_value  = 0.125  (25 cent spread, per side)
+//
+// Commission here is cash per ORDER = half the round-trip spread cost:
+//   cost = units x spread_in_price / 2
 strategy("Scalper Pro Strategy", "ScalpStr", overlay = true,
      default_qty_type = strategy.fixed, default_qty_value = 1000,
      initial_capital = 60, currency = currency.USD,
@@ -35,6 +41,18 @@ strategy("Scalper Pro Strategy", "ScalpStr", overlay = true,
      max_labels_count = 100)
 
 // ════════════════════════════════ INPUTS ════════════════════════════════════
+
+// Pip size and contract size differ enormously by instrument:
+//   EURUSD  1 lot = 100,000 units, pip 0.0001 -> $10/pip/lot
+//   XAUUSD  1 lot = 100 ounces,    pip 0.10   -> $10/pip/lot
+gIN = "0  Instrument"
+instPreset = input.string("Auto detect", "Instrument", group = gIN,
+     options = ["Auto detect", "Forex", "Gold XAUUSD", "Silver XAGUSD",
+     "Index / Crypto", "Custom"])
+customPip = input.float(0.10, "Custom: pip size in price", group = gIN,
+     minval = 0.00001, step = 0.00001)
+// No contract-size input here: in a strategy the position size comes from
+// default_qty_value in the declaration above, not from this section.
 
 gTF = "1  Timeframes"
 tfMacro = input.timeframe("1D", "Macro bias", group = gTF)
@@ -66,7 +84,8 @@ sessTz = input.string("GMT", "Timezone", group = gSS,
      "America/New_York", "Europe/London", "Asia/Tokyo"])
 
 gRK = "5  Risk"
-spreadPips = input.float(1.5, "Spread (pips)", group = gRK, minval = 0.0, step = 0.1)
+spreadPips = input.float(2.0, "Spread (pips)", group = gRK, minval = 0.0, step = 0.1,
+     tooltip = "EURUSD ~1.0-1.5. XAUUSD ~2.0-3.5 (20-35 cents).")
 minTpSpread = input.float(3.0, "Minimum TP1 = spread x", group = gRK,
      minval = 1.0, step = 0.5)
 rr1 = input.float(1.0, "TP1 (R)", group = gRK, minval = 0.5, step = 0.25)
@@ -111,7 +130,16 @@ cumV += nz(volume)
 vwap = cumV > 0 ? cumPV / cumV : na
 vwapOk = timeframe.isintraday and not na(vwap)
 
-pipSize = syminfo.type == "forex" ? syminfo.mintick * 10.0 : syminfo.mintick
+tickUp = str.upper(syminfo.ticker)
+autoGold = str.contains(tickUp, "XAU") or str.contains(tickUp, "GOLD")
+autoSilver = str.contains(tickUp, "XAG") or str.contains(tickUp, "SILVER")
+autoFx = syminfo.type == "forex" and not autoGold and not autoSilver
+isGold = instPreset == "Gold XAUUSD" or (instPreset == "Auto detect" and autoGold)
+isSilver = instPreset == "Silver XAGUSD" or (instPreset == "Auto detect" and autoSilver)
+isFx = instPreset == "Forex" or (instPreset == "Auto detect" and autoFx)
+isCustom = instPreset == "Custom"
+pipSize = isCustom ? customPip : isGold ? 0.10 : isSilver ? 0.001 :
+     isFx ? syminfo.mintick * 10.0 : syminfo.mintick
 atrPips = atr / pipSize
 inKZ = not na(time(timeframe.period, sessA, sessTz)) or
      not na(time(timeframe.period, sessB, sessTz))
