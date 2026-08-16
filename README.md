@@ -146,3 +146,18 @@ Tri-Star (TS), Advance Block (AB), Deliberation (DEL), Ladder Top (LDT).
 
 Educational and analytical tool. Not financial advice. Trading involves
 substantial risk of loss — do your own research and manage your own risk.
+
+---
+
+## Two systems in this repo
+
+| Script | For | Timeframes |
+|---|---|---|
+| **`scalper_pro.pine`** | Focused 1m–5m scalping: HTF bias → liquidity sweep / pullback / break-retest → execution trigger. Position sizing built in. | 1m–15m chart, 1H + 1D bias |
+| `scalper_pro_strategy.pine` | Backtesting the above — expectancy, profit factor, drawdown | same |
+| `candlestick_master_oscillators.pine` | RSI / MACD / Stochastic in their own pane | any |
+| `candlestick_master_pro.pine` | 45 candlestick patterns + confluence. A different tool for higher timeframes | H1–D1 |
+
+**Start here:** [`STRATEGY.md`](STRATEGY.md) — why this strategy, what each
+indicator is for, exact entry/exit rules, the $60 risk framework, how repainting
+is prevented, and how to backtest it honestly.

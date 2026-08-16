@@ -1,0 +1,378 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+// SCALPER PRO — STRATEGY (backtest version of scalper_pro.pine)
+//
+// WHY A SEPARATE FILE
+//   An indicator cannot report expectancy, profit factor or drawdown. Labels on
+//   a chart always look good in hindsight; a strategy tester does not flatter
+//   you. Use this to decide whether the edge is real, then trade the indicator.
+//
+//   The entry and exit logic here is IDENTICAL to the indicator. The drawing,
+//   panel and legend are removed. If you change one file, change both.
+//
+// HOW TO TEST HONESTLY  (details in STRATEGY.md section H)
+//   • Set commission to your real spread. The default below is cash per order
+//     and must be edited to match your broker.
+//   • Set slippage to at least 1-2 ticks.
+//   • Judge it on expectancy per trade, profit factor, max drawdown in R and
+//     the longest losing streak — not on net profit.
+//   • Under ~200 trades the result is noise.
+//
+// NO REPAINTING
+//   Entries are evaluated on confirmed bars via process_orders_on_close, and
+//   all higher-timeframe data uses the expr[1] + lookahead_on idiom.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// default_qty_value = 1000 units = 0.01 lot, the size you would actually trade.
+// commission_value is cash per ORDER: for 1000 units of EURUSD at a 1.5 pip
+// spread the round trip costs 1000 x 0.00015 = $0.15, so $0.075 per side.
+// EDIT BOTH to match your broker and pair before trusting any result.
+strategy("Scalper Pro Strategy", "ScalpStr", overlay = true,
+     default_qty_type = strategy.fixed, default_qty_value = 1000,
+     initial_capital = 60, currency = currency.USD,
+     commission_type = strategy.commission.cash_per_order, commission_value = 0.075,
+     slippage = 1, process_orders_on_close = true, calc_on_every_tick = false,
+     max_labels_count = 100)
+
+// ════════════════════════════════ INPUTS ════════════════════════════════════
+
+gTF = "1  Timeframes"
+tfMacro = input.timeframe("1D", "Macro bias", group = gTF)
+tfDir = input.timeframe("60", "Direction bias", group = gTF)
+tfSetup = input.timeframe("5", "Setup / liquidity", group = gTF)
+
+gST = "2  Structure"
+pivLen = input.int(3, "Swing pivot length", group = gST, minval = 2, maxval = 10)
+liqLook = input.int(12, "Liquidity lookback", group = gST, minval = 4, maxval = 60)
+retestBars = input.int(12, "Break-retest valid for (bars)", group = gST,
+     minval = 2, maxval = 50)
+
+gEX = "3  Execution"
+maxExtATR = input.float(1.2, "Reject entry beyond (x ATR) from EMA9", group = gEX,
+     minval = 0.3, step = 0.1)
+rsiChase = input.float(75.0, "RSI do-not-chase level", group = gEX,
+     minval = 55, maxval = 95, step = 1)
+volMult = input.float(1.2, "Volume confirmation multiple", group = gEX,
+     minval = 0.5, step = 0.1)
+minAtrPips = input.float(2.0, "Minimum ATR (pips)", group = gEX,
+     minval = 0.1, step = 0.1)
+
+gSS = "4  Session filter"
+useSession = input.bool(true, "Trade killzones only", group = gSS)
+sessA = input.session("0700-1000", "London", group = gSS)
+sessB = input.session("1200-1500", "New York", group = gSS)
+sessTz = input.string("GMT", "Timezone", group = gSS,
+     options = ["GMT", "GMT-5", "GMT-4", "GMT+1", "GMT+2", "GMT+7", "GMT+8",
+     "America/New_York", "Europe/London", "Asia/Tokyo"])
+
+gRK = "5  Risk"
+spreadPips = input.float(1.5, "Spread (pips)", group = gRK, minval = 0.0, step = 0.1)
+minTpSpread = input.float(3.0, "Minimum TP1 = spread x", group = gRK,
+     minval = 1.0, step = 0.5)
+rr1 = input.float(1.0, "TP1 (R)", group = gRK, minval = 0.5, step = 0.25)
+maxR = input.float(3.0, "Cap TP2 at (R)", group = gRK, minval = 1.0, step = 0.5)
+stopFloorATR = input.float(0.6, "Stop floor (x ATR)", group = gRK,
+     minval = 0.2, step = 0.1)
+maxHoldBars = input.int(30, "Time stop (bars)", group = gRK, minval = 3, maxval = 200)
+tp1Pct = input.int(50, "Percent closed at TP1", group = gRK, minval = 10, maxval = 90,
+     tooltip = "The rest runs to TP2 with the stop moved to break-even.")
+
+gSC = "6  Thresholds"
+thLong = input.int(70, "LONG / SHORT score", group = gSC, minval = 40, maxval = 95)
+cooldown = input.int(6, "Bars between signals", group = gSC, minval = 0, maxval = 60)
+
+// ═════════════════════════ CORE CALCULATIONS ════════════════════════════════
+
+atr = ta.atr(14)
+ema9 = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+rsi = ta.rsi(close, 9)
+rsiUp = rsi > rsi[1]
+rsiDn = rsi < rsi[1]
+
+bbBasis = ta.sma(close, 20)
+bbDev = ta.stdev(close, 20) * 2.0
+bbw = bbBasis != 0 ? (bbBasis + bbDev - (bbBasis - bbDev)) / math.abs(bbBasis) : 0.0
+bbwRank = ta.percentrank(bbw, 100)
+
+volSma = ta.sma(volume, 20)
+volKnown = not na(volume) and volume > 0
+volOk = volKnown and not na(volSma) and volSma > 0 and volume > volSma * volMult
+
+newDay = nz(ta.change(time("1D")), 0) != 0
+var float cumPV = 0.0
+var float cumV = 0.0
+if newDay or barstate.isfirst
+    cumPV := 0.0
+    cumV := 0.0
+cumPV += hlc3 * nz(volume)
+cumV += nz(volume)
+vwap = cumV > 0 ? cumPV / cumV : na
+vwapOk = timeframe.isintraday and not na(vwap)
+
+pipSize = syminfo.type == "forex" ? syminfo.mintick * 10.0 : syminfo.mintick
+atrPips = atr / pipSize
+inKZ = not na(time(timeframe.period, sessA, sessTz)) or
+     not na(time(timeframe.period, sessB, sessTz))
+sessionOk = not useSession or not timeframe.isintraday or inKZ
+
+// ═══════════════════════ HIGHER TIMEFRAME CONTEXT ═══════════════════════════
+
+[dClose, dE20, dE50, dHigh, dLow] = request.security(syminfo.tickerid, tfMacro,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1], high[1], low[1]],
+     lookahead = barmerge.lookahead_on)
+[hClose, hE20, hE50, hRsi] = request.security(syminfo.tickerid, tfDir,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1], ta.rsi(close, 14)[1]],
+     lookahead = barmerge.lookahead_on)
+[sE20, sHi, sLo] = request.security(syminfo.tickerid, tfSetup,
+     [ta.ema(close, 20)[1], ta.highest(high, liqLook)[1], ta.lowest(low, liqLook)[1]],
+     lookahead = barmerge.lookahead_on)
+
+setupIsHigher = timeframe.in_seconds() < timeframe.in_seconds(tfSetup)
+chartHi = ta.highest(high, liqLook)[1]
+chartLo = ta.lowest(low, liqLook)[1]
+liqHi = setupIsHigher and not na(sHi) ? sHi : chartHi
+liqLo = setupIsHigher and not na(sLo) ? sLo : chartLo
+setupE20 = setupIsHigher and not na(sE20) ? sE20 : ema20
+dayIsHigher = timeframe.in_seconds() < timeframe.in_seconds("1D")
+pdh = dayIsHigher ? dHigh : na
+pdl = dayIsHigher ? dLow : na
+
+macroBias = na(dClose) or na(dE20) or na(dE50) ? 0 :
+     dClose > dE20 and dE20 > dE50 ? 1 :
+     dClose < dE20 and dE20 < dE50 ? -1 :
+     dClose > dE20 ? 1 : dClose < dE20 ? -1 : 0
+dirBias = na(hClose) or na(hE20) or na(hE50) ? 0 :
+     hClose > hE20 and hE20 > hE50 ? 1 :
+     hClose < hE20 and hE20 < hE50 ? -1 :
+     hClose > hE20 and hRsi > 50 ? 1 :
+     hClose < hE20 and hRsi < 50 ? -1 : 0
+setupBias = na(setupE20) ? 0 : close > setupE20 ? 1 : close < setupE20 ? -1 : 0
+
+// ════════════════════════ MARKET STRUCTURE ENGINE ═══════════════════════════
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+var float swHi = na
+var float swLo = na
+var bool swHiLive = false
+var bool swLoLive = false
+var int structDir = 0
+if not na(ph)
+    swHi := ph
+    swHiLive := true
+if not na(pl)
+    swLo := pl
+    swLoLive := true
+bosUp = swHiLive and not na(swHi) and close > swHi
+bosDn = swLoLive and not na(swLo) and close < swLo
+var float retestUp = na
+var int retestUpBar = na
+var float retestDn = na
+var int retestDnBar = na
+if bosUp
+    swHiLive := false
+    structDir := 1
+    retestUp := swHi
+    retestUpBar := bar_index
+if bosDn
+    swLoLive := false
+    structDir := -1
+    retestDn := swLo
+    retestDnBar := bar_index
+
+// ═══════════════════════════ REGIME DETECTION ═══════════════════════════════
+
+emaBull = ema9 > ema20 and ema20 > ema50
+emaBear = ema9 < ema20 and ema20 < ema50
+trending = emaBull or emaBear
+dead = atrPips < minAtrPips
+regime = dead ? "DEAD" : bbwRank > 80 ? "HIGH VOL" :
+     bbwRank < 25 ? "SQUEEZE" : trending ? "TREND" : "RANGE"
+allowPullback = regime == "TREND" or regime == "HIGH VOL"
+allowRetest = allowPullback
+allowSweep = regime == "TREND" or regime == "RANGE" or regime == "HIGH VOL"
+
+// ═══════════════════════════ SETUP DETECTION ════════════════════════════════
+
+body = math.abs(close - open)
+rng = high - low
+upW = high - math.max(close, open)
+loW = math.min(close, open) - low
+tol = atr * 0.15
+
+bullEngulf = close > open and close[1] < open[1] and close >= open[1] and
+     open <= close[1] and body > body[1]
+bearEngulf = close < open and close[1] > open[1] and close <= open[1] and
+     open >= close[1] and body > body[1]
+bullReject = rng > 0 and loW >= body * 2.0 and loW >= rng * 0.5 and close > open
+bearReject = rng > 0 and upW >= body * 2.0 and upW >= rng * 0.5 and close < open
+bullDrive = rng > 0 and close > open and body >= rng * 0.5 and close >= low + rng * 0.66
+bearDrive = rng > 0 and close < open and body >= rng * 0.5 and close <= high - rng * 0.66
+bullTrig = bullEngulf or bullReject or bullDrive
+bearTrig = bearEngulf or bearReject or bearDrive
+
+sweptLoLevel = not na(pdl) and low < pdl and low >= liqLo ? pdl : liqLo
+sweptHiLevel = not na(pdh) and high > pdh and high <= liqHi ? pdh : liqHi
+bullSweep = allowSweep and not na(sweptLoLevel) and low < sweptLoLevel and
+     close > sweptLoLevel and close > open
+bearSweep = allowSweep and not na(sweptHiLevel) and high > sweptHiLevel and
+     close < sweptHiLevel and close < open
+
+bandTop = math.max(ema9, ema20)
+bandBot = math.min(ema9, ema20)
+taggedLong = low <= bandTop + tol or (vwapOk and low <= vwap + tol)
+taggedShort = high >= bandBot - tol or (vwapOk and high >= vwap - tol)
+extATR = atr > 0 ? math.abs(close - ema9) / atr : 0.0
+notExt = extATR <= maxExtATR
+bullPull = allowPullback and emaBull and taggedLong and close > ema20 and notExt
+bearPull = allowPullback and emaBear and taggedShort and close < ema20 and notExt
+
+bullRetest = allowRetest and not na(retestUp) and
+     bar_index - retestUpBar <= retestBars and bar_index > retestUpBar and
+     low <= retestUp + tol and close > retestUp
+bearRetest = allowRetest and not na(retestDn) and
+     bar_index - retestDnBar <= retestBars and bar_index > retestDnBar and
+     high >= retestDn - tol and close < retestDn
+
+longSetup = bullSweep ? "SWEEP" : bullRetest ? "BREAK-RETEST" :
+     bullPull ? "PULLBACK" : ""
+shortSetup = bearSweep ? "SWEEP" : bearRetest ? "BREAK-RETEST" :
+     bearPull ? "PULLBACK" : ""
+
+// ═════════════════════════════ RISK GEOMETRY ════════════════════════════════
+
+buffer = spreadPips * pipSize * 1.5
+swingLo3 = ta.lowest(low, 3)
+swingHi3 = ta.highest(high, 3)
+stopRefLong = bullSweep ? low :
+     bullRetest and not na(retestUp) ? math.min(low, retestUp) : swingLo3
+stopRefShort = bearSweep ? high :
+     bearRetest and not na(retestDn) ? math.max(high, retestDn) : swingHi3
+riskLong = math.max(close - stopRefLong, atr * stopFloorATR) + buffer
+riskShort = math.max(stopRefShort - close, atr * stopFloorATR) + buffer
+
+big = math.max(atr * 1000.0, 1.0)
+roomUp = math.min(not na(liqHi) and liqHi > close ? liqHi - close : big,
+     not na(pdh) and pdh > close ? pdh - close : big)
+roomDn = math.min(not na(liqLo) and liqLo < close ? close - liqLo : big,
+     not na(pdl) and pdl < close ? close - pdl : big)
+minTpPrice = spreadPips * minTpSpread * pipSize
+tpOkLong = riskLong * rr1 >= minTpPrice
+tpOkShort = riskShort * rr1 >= minTpPrice
+roomOkLong = roomUp >= riskLong * rr1
+roomOkShort = roomDn >= riskShort * rr1
+
+// ══════════════════════════════ SCORING ═════════════════════════════════════
+
+setupScore(string s) =>
+    s == "SWEEP" ? 20 : s == "BREAK-RETEST" ? 16 : s == "PULLBACK" ? 14 : 0
+
+scoreSide(int dir) =>
+    bool bull = dir == 1
+    string setup = bull ? longSetup : shortSetup
+    int sc = 0
+    sc += (bull ? macroBias >= 0 : macroBias <= 0) ? (macroBias == 0 ? 8 : 15) : 0
+    sc += (bull ? dirBias == 1 : dirBias == -1) ? 20 : (dirBias == 0 ? 8 : 0)
+    sc += (bull ? setupBias >= 0 : setupBias <= 0) ? 8 : 0
+    sc += (bull ? structDir >= 0 : structDir <= 0) ? 7 : 0
+    sc += setupScore(setup)
+    bool atLevel = bull ? (not na(liqLo) and math.abs(low - liqLo) <= tol * 2) :
+         (not na(liqHi) and math.abs(high - liqHi) <= tol * 2)
+    bool atValue = bull ? taggedLong : taggedShort
+    bool vwapSide = not vwapOk or (bull ? close > vwap : close < vwap)
+    sc += (atLevel ? 4 : 0) + (atValue ? 3 : 0) + (vwapSide ? 3 : 0)
+    bool rsiDir = bull ? rsiUp : rsiDn
+    bool rsiRoom = bull ? rsi < rsiChase : rsi > 100.0 - rsiChase
+    sc += (rsiDir ? 5 : 0) + (rsiRoom ? 5 : 0)
+    sc += volKnown ? (volOk ? 5 : 0) : 3
+    sc += (bull ? roomOkLong : roomOkShort) ? 5 : 0
+    sc
+
+longScore = scoreSide(1)
+shortScore = scoreSide(-1)
+
+// ══════════════════════════ ENTRY CONDITIONS ════════════════════════════════
+
+sweepExcLong = bullSweep and macroBias >= 0
+sweepExcShort = bearSweep and macroBias <= 0
+alignLong = dirBias >= 0 or sweepExcLong
+alignShort = dirBias <= 0 or sweepExcShort
+
+reqLong = sessionOk and not dead and longSetup != "" and bullTrig and tpOkLong and
+     not (macroBias == -1 and dirBias == -1) and rsi < rsiChase
+reqShort = sessionOk and not dead and shortSetup != "" and bearTrig and tpOkShort and
+     not (macroBias == 1 and dirBias == 1) and rsi > 100.0 - rsiChase
+
+var int lastSigBar = -9999
+coolOk = bar_index - lastSigBar >= cooldown
+flat = strategy.position_size == 0
+
+rawLong = reqLong and alignLong and coolOk and longScore >= thLong and flat
+rawShort = reqShort and alignShort and coolOk and shortScore >= thLong and flat
+goLong = rawLong and not rawShort
+goShort = rawShort and not rawLong
+
+// ═══════════════════════════ ORDER MANAGEMENT ═══════════════════════════════
+// Bracket: TP1 takes a partial and TP2 runs the remainder. The stop moves to
+// break-even once TP1 fills, and a bar-count timer closes anything still open.
+
+var float eSL = na
+var float eTP1 = na
+var float eTP2 = na
+var int eBar = na
+var bool beMoved = false
+
+if goLong
+    lastSigBar := bar_index
+    eSL := close - riskLong
+    eTP1 := close + riskLong * rr1
+    eTP2 := close + math.min(math.max(roomUp, riskLong * rr1 * 1.5), riskLong * maxR)
+    eBar := bar_index
+    beMoved := false
+    strategy.entry("L", strategy.long, comment = longSetup)
+
+if goShort
+    lastSigBar := bar_index
+    eSL := close + riskShort
+    eTP1 := close - riskShort * rr1
+    eTP2 := close - math.min(math.max(roomDn, riskShort * rr1 * 1.5), riskShort * maxR)
+    eBar := bar_index
+    beMoved := false
+    strategy.entry("S", strategy.short, comment = shortSetup)
+
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// TP1 fill moves the stop to break-even for the remainder.
+if inLong and not beMoved and high >= eTP1
+    beMoved := true
+if inShort and not beMoved and low <= eTP1
+    beMoved := true
+activeStop = beMoved ? strategy.position_avg_price : eSL
+
+if inLong
+    strategy.exit("L-TP1", from_entry = "L", qty_percent = tp1Pct,
+         limit = eTP1, stop = activeStop)
+    strategy.exit("L-TP2", from_entry = "L", limit = eTP2, stop = activeStop)
+if inShort
+    strategy.exit("S-TP1", from_entry = "S", qty_percent = tp1Pct,
+         limit = eTP1, stop = activeStop)
+    strategy.exit("S-TP2", from_entry = "S", limit = eTP2, stop = activeStop)
+
+// Time stop. A scalp that stops moving is a losing scalp holding your margin.
+// Reads position_size directly rather than `flat`, which was captured before
+// this bar's entries were placed.
+if strategy.position_size != 0 and not na(eBar) and bar_index - eBar >= maxHoldBars
+    strategy.close_all(comment = "time stop")
+
+// ══════════════════════════ MINIMAL VISUALS ═════════════════════════════════
+// Kept deliberately sparse: this script is for the Strategy Tester, not the eye.
+
+plot(ema9, "EMA 9", #FFD600, 1)
+plot(ema20, "EMA 20", #FF00E5, 1)
+plot(ema50, "EMA 50", #00B0FF, 1)
+plot(vwapOk ? vwap : na, "VWAP", #00E5FF, 2)
+plotshape(goLong, "Long", shape.triangleup, location.belowbar, #00E676, size = size.tiny)
+plotshape(goShort, "Short", shape.triangledown, location.abovebar, #FF1744, size = size.tiny)

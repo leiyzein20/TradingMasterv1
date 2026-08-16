@@ -1,0 +1,775 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+// SCALPER PRO — multi-timeframe scalping framework for 1m–5m execution
+//
+// Design document: STRATEGY.md (read it — this header is only a summary).
+// Backtest version: scalper_pro_strategy.pine (same logic, no drawings).
+//
+// MODEL
+//   1D  macro bias      → veto layer, never an entry
+//   1H  direction       → decides whether longs or shorts have priority
+//   5M  setup           → liquidity pools and structure: WHERE a trade may occur
+//   1-3M execution      → trigger, momentum, stop and target: WHEN
+//
+// THREE SETUPS ONLY
+//   SWEEP        wick through a liquidity level, close back inside
+//   PULLBACK     trend + return to the EMA9/20 band or VWAP + rejection
+//   BREAK-RETEST BOS, then price returns to the broken level and holds
+//
+// NOT INCLUDED, ON PURPOSE
+//   MACD      — 26-period lookback on a 1m chart confirms after a 3-minute
+//               scalp is over, and it is a derivative of EMAs already here
+//   Stochastic— duplicates RSI
+//   ADX       — double-smoothed, identifies a trend about when it ends
+//   45 candle patterns — daily-chart formations are noise on 1m
+//
+// NO REPAINTING
+//   Signals fire only on barstate.isconfirmed. All higher-timeframe data uses
+//   the request.security(..., expr[1], lookahead_on) idiom, which returns the
+//   last CLOSED higher-timeframe bar and is identical live and historically.
+//   Structure uses confirmed pivots only, and each swing can break once.
+//
+// The score is confluence quality, NOT a win probability.
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("Scalper Pro", "ScalpPro", overlay = true,
+     max_labels_count = 300, max_lines_count = 200, max_boxes_count = 100)
+
+// ════════════════════════════════ INPUTS ════════════════════════════════════
+
+gTF = "1  Timeframes"
+tfMacro = input.timeframe("1D", "Macro bias", group = gTF)
+tfDir = input.timeframe("60", "Direction bias", group = gTF)
+tfSetup = input.timeframe("5", "Setup / liquidity", group = gTF)
+maxChartMin = input.int(15, "Warn above chart timeframe (minutes)",
+     group = gTF, minval = 1, maxval = 240)
+
+gST = "2  Structure"
+pivLen = input.int(3, "Swing pivot length", group = gST, minval = 2, maxval = 10,
+     tooltip = "Bars either side of a pivot. 3 suits 1-5m. Higher = fewer, larger swings.")
+liqLook = input.int(12, "Liquidity lookback (setup TF bars)", group = gST,
+     minval = 4, maxval = 60)
+retestBars = input.int(12, "Break-retest valid for (bars)", group = gST,
+     minval = 2, maxval = 50)
+
+gEX = "3  Execution"
+maxExtATR = input.float(1.2, "Reject entry beyond (x ATR) from EMA9", group = gEX,
+     minval = 0.3, step = 0.1,
+     tooltip = "Anti-chasing. The most expensive scalping mistake is entering after the move ran.")
+rsiChase = input.float(75.0, "RSI do-not-chase level", group = gEX,
+     minval = 55, maxval = 95, step = 1)
+volMult = input.float(1.2, "Volume confirmation multiple", group = gEX,
+     minval = 0.5, step = 0.1)
+minAtrPips = input.float(2.0, "Minimum ATR (pips) to trade", group = gEX,
+     minval = 0.1, step = 0.1,
+     tooltip = "Below this the market cannot pay the spread. Regime shows DEAD.")
+
+gSS = "4  Session filter"
+useSession = input.bool(true, "Trade killzones only", group = gSS)
+sessA = input.session("0700-1000", "London", group = gSS)
+sessB = input.session("1200-1500", "New York", group = gSS)
+sessTz = input.string("GMT", "Timezone", group = gSS,
+     options = ["GMT", "GMT-5", "GMT-4", "GMT+1", "GMT+2", "GMT+7", "GMT+8",
+     "America/New_York", "Europe/London", "Asia/Tokyo"])
+
+gRK = "5  Risk & account"
+acctSize = input.float(60.0, "Account size ($)", group = gRK, minval = 1, step = 10)
+riskPct = input.float(1.5, "Risk per trade (%)", group = gRK,
+     minval = 0.1, maxval = 5.0, step = 0.1)
+spreadPips = input.float(1.5, "Your typical spread (pips)", group = gRK,
+     minval = 0.0, step = 0.1,
+     tooltip = "Used for the stop buffer and the minimum-target test. Check it on your broker.")
+minTpSpread = input.float(3.0, "Minimum TP1 = spread x", group = gRK,
+     minval = 1.0, step = 0.5)
+contractSize = input.float(100000.0, "Units per 1.00 lot", group = gRK, minval = 1)
+minLot = input.float(0.01, "Broker minimum lot", group = gRK, minval = 0.0001)
+rr1 = input.float(1.0, "TP1 (R)", group = gRK, minval = 0.5, step = 0.25)
+maxR = input.float(3.0, "Cap TP2 at (R)", group = gRK, minval = 1.0, step = 0.5)
+stopFloorATR = input.float(0.6, "Stop floor (x ATR)", group = gRK,
+     minval = 0.2, step = 0.1)
+maxHoldBars = input.int(30, "Time stop (bars)", group = gRK,
+     minval = 3, maxval = 200)
+
+gSC = "6  Signal thresholds"
+thLong = input.int(70, "LONG / SHORT score", group = gSC, minval = 40, maxval = 95)
+thStrong = input.int(85, "STRONG score", group = gSC, minval = 50, maxval = 100)
+cooldown = input.int(6, "Bars between signals", group = gSC, minval = 0, maxval = 60)
+
+gVI = "7  Display"
+showEMA = input.bool(true, "EMAs 9 / 20 / 50 / 200", group = gVI)
+showVWAP = input.bool(true, "VWAP", group = gVI)
+showBB = input.bool(false, "Bollinger bands", group = gVI,
+     tooltip = "Off by default. The bands are used for regime detection whether or not they are drawn.")
+showLevels = input.bool(true, "Liquidity + S/R levels", group = gVI)
+showStruct = input.bool(true, "BOS / CHoCH marks", group = gVI)
+showTrade = input.bool(true, "Entry / SL / TP lines", group = gVI)
+showPanel = input.bool(true, "Status panel", group = gVI)
+showLegend = input.bool(true, "Colour legend", group = gVI)
+
+// Fixed, deliberately distinct palette. Nothing here is a shade of another.
+cE9 = #FFD600      // yellow
+cE20 = #FF00E5     // magenta
+cE50 = #00B0FF     // sky blue
+cE200 = #9E9E9E    // grey
+cVwap = #00E5FF    // cyan
+cBB = #7E57C2      // purple
+cSup = #00C853     // green
+cRes = #D50000     // red
+cBull = #00E676    // bright green
+cBear = #FF1744    // bright red
+cNeut = #78909C    // slate
+cEntry = #FFFFFF   // white
+cSL = #FF1744      // red
+cTP = #00E676      // green
+cSweep = #FFAB00   // amber
+cChoch = #FF9100   // orange
+
+// ═════════════════════════ CORE CALCULATIONS ════════════════════════════════
+
+atr = ta.atr(14)
+ema9 = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+rsi = ta.rsi(close, 9)
+rsiUp = rsi > rsi[1]
+rsiDn = rsi < rsi[1]
+
+bbBasis = ta.sma(close, 20)
+bbDev = ta.stdev(close, 20) * 2.0
+bbUp = bbBasis + bbDev
+bbLo = bbBasis - bbDev
+bbw = bbBasis != 0 ? (bbUp - bbLo) / math.abs(bbBasis) : 0.0
+bbwRank = ta.percentrank(bbw, 100)
+
+volSma = ta.sma(volume, 20)
+volOk = not na(volume) and volume > 0 and not na(volSma) and volSma > 0 and
+     volume > volSma * volMult
+volKnown = not na(volume) and volume > 0
+
+// Session VWAP, computed manually: ta.vwap errors on symbols without volume.
+newDay = nz(ta.change(time("1D")), 0) != 0
+var float cumPV = 0.0
+var float cumV = 0.0
+if newDay or barstate.isfirst
+    cumPV := 0.0
+    cumV := 0.0
+cumPV += hlc3 * nz(volume)
+cumV += nz(volume)
+vwap = cumV > 0 ? cumPV / cumV : na
+vwapOk = timeframe.isintraday and not na(vwap)
+
+pipSize = syminfo.type == "forex" ? syminfo.mintick * 10.0 : syminfo.mintick
+atrPips = atr / pipSize
+
+inSessA = not na(time(timeframe.period, sessA, sessTz))
+inSessB = not na(time(timeframe.period, sessB, sessTz))
+inKZ = inSessA or inSessB
+sessionOk = not useSession or not timeframe.isintraday or inKZ
+
+chartMin = timeframe.in_seconds() / 60.0
+tfOk = chartMin <= maxChartMin
+
+// ═══════════════════════ HIGHER TIMEFRAME CONTEXT ═══════════════════════════
+// Every request uses expr[1] with lookahead_on: that returns the last CLOSED
+// bar of the higher timeframe, which is identical in history and in real time.
+// The naive form (no [1]) delivers the in-progress bar and repaints.
+
+[dClose, dE20, dE50, dHigh, dLow] = request.security(syminfo.tickerid, tfMacro,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1], high[1], low[1]],
+     lookahead = barmerge.lookahead_on)
+
+[hClose, hE20, hE50, hRsi] = request.security(syminfo.tickerid, tfDir,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1], ta.rsi(close, 14)[1]],
+     lookahead = barmerge.lookahead_on)
+
+[sE20, sHi, sLo] = request.security(syminfo.tickerid, tfSetup,
+     [ta.ema(close, 20)[1], ta.highest(high, liqLook)[1], ta.lowest(low, liqLook)[1]],
+     lookahead = barmerge.lookahead_on)
+
+// A request to a timeframe at or below the chart's own is meaningless, so those
+// values fall back to the chart series.
+setupIsHigher = timeframe.in_seconds() < timeframe.in_seconds(tfSetup)
+// Hoisted out of the ternary below: a ta.* call inside a conditional branch
+// only advances its internal state on the bars where that branch is taken.
+chartHi = ta.highest(high, liqLook)[1]
+chartLo = ta.lowest(low, liqLook)[1]
+liqHi = setupIsHigher and not na(sHi) ? sHi : chartHi
+liqLo = setupIsHigher and not na(sLo) ? sLo : chartLo
+setupE20 = setupIsHigher and not na(sE20) ? sE20 : ema20
+
+dayIsHigher = timeframe.in_seconds() < timeframe.in_seconds("1D")
+pdh = dayIsHigher ? dHigh : na
+pdl = dayIsHigher ? dLow : na
+
+// 1D macro bias: -1 bearish, 0 neutral, +1 bullish
+macroBias = na(dClose) or na(dE20) or na(dE50) ? 0 :
+     dClose > dE20 and dE20 > dE50 ? 1 :
+     dClose < dE20 and dE20 < dE50 ? -1 :
+     dClose > dE20 ? 1 : dClose < dE20 ? -1 : 0
+// 1H direction bias, with RSI acting only as a tie-breaker on the neutral case
+dirBias = na(hClose) or na(hE20) or na(hE50) ? 0 :
+     hClose > hE20 and hE20 > hE50 ? 1 :
+     hClose < hE20 and hE20 < hE50 ? -1 :
+     hClose > hE20 and hRsi > 50 ? 1 :
+     hClose < hE20 and hRsi < 50 ? -1 : 0
+setupBias = na(setupE20) ? 0 : close > setupE20 ? 1 : close < setupE20 ? -1 : 0
+
+biasTxt(int b) =>
+    b == 1 ? "BULL" : b == -1 ? "BEAR" : "NEUTRAL"
+
+// ════════════════════════ MARKET STRUCTURE ENGINE ═══════════════════════════
+// Confirmed pivots only. Each swing may be broken exactly once, which makes a
+// break a discrete event rather than a condition that stays true all trend.
+
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+
+var float swHi = na
+var float swLo = na
+var float prevSwHi = na
+var float prevSwLo = na
+var int swHiBar = na
+var int swLoBar = na
+var bool swHiLive = false
+var bool swLoLive = false
+var int structDir = 0
+
+if not na(ph)
+    prevSwHi := swHi
+    swHi := ph
+    swHiBar := bar_index - pivLen
+    swHiLive := true
+if not na(pl)
+    prevSwLo := swLo
+    swLo := pl
+    swLoBar := bar_index - pivLen
+    swLoLive := true
+
+// HH / HL / LH / LL description of the last two confirmed swings.
+hh = not na(swHi) and not na(prevSwHi) and swHi > prevSwHi
+lh = not na(swHi) and not na(prevSwHi) and swHi < prevSwHi
+hl = not na(swLo) and not na(prevSwLo) and swLo > prevSwLo
+ll = not na(swLo) and not na(prevSwLo) and swLo < prevSwLo
+structTxt = hh and hl ? "HH+HL bull" : lh and ll ? "LH+LL bear" :
+     hh or hl ? "mixed bull" : lh or ll ? "mixed bear" : "forming"
+
+bosUp = swHiLive and not na(swHi) and close > swHi
+bosDn = swLoLive and not na(swLo) and close < swLo
+chochUp = bosUp and structDir == -1
+chochDn = bosDn and structDir == 1
+float brokeHi = bosUp ? swHi : na
+float brokeLo = bosDn ? swLo : na
+
+var float retestUp = na
+var int retestUpBar = na
+var float retestDn = na
+var int retestDnBar = na
+
+if bosUp
+    swHiLive := false
+    structDir := 1
+    retestUp := swHi
+    retestUpBar := bar_index
+if bosDn
+    swLoLive := false
+    structDir := -1
+    retestDn := swLo
+    retestDnBar := bar_index
+
+// ═══════════════════════════ REGIME DETECTION ═══════════════════════════════
+
+emaBull = ema9 > ema20 and ema20 > ema50
+emaBear = ema9 < ema20 and ema20 < ema50
+trending = emaBull or emaBear
+dead = atrPips < minAtrPips
+regime = dead ? "DEAD" :
+     bbwRank > 80 ? "HIGH VOL" :
+     bbwRank < 25 ? "SQUEEZE" :
+     trending ? "TREND" : "RANGE"
+
+// Regime decides which setups may fire. Squeeze and dead markets produce none:
+// no trade is a valid output.
+allowPullback = regime == "TREND" or regime == "HIGH VOL"
+allowRetest = regime == "TREND" or regime == "HIGH VOL"
+allowSweep = regime == "TREND" or regime == "RANGE" or regime == "HIGH VOL"
+
+// ═══════════════════════════ SETUP DETECTION ════════════════════════════════
+
+body = math.abs(close - open)
+rng = high - low
+upW = high - math.max(close, open)
+loW = math.min(close, open) - low
+tol = atr * 0.15
+
+// Trigger candles: the five forms that actually mark a turn on a 1m chart.
+bullEngulf = close > open and close[1] < open[1] and close >= open[1] and
+     open <= close[1] and body > body[1]
+bearEngulf = close < open and close[1] > open[1] and close <= open[1] and
+     open >= close[1] and body > body[1]
+bullReject = rng > 0 and loW >= body * 2.0 and loW >= rng * 0.5 and close > open
+bearReject = rng > 0 and upW >= body * 2.0 and upW >= rng * 0.5 and close < open
+bullDrive = rng > 0 and close > open and body >= rng * 0.5 and close >= low + rng * 0.66
+bearDrive = rng > 0 and close < open and body >= rng * 0.5 and close <= high - rng * 0.66
+bullTrig = bullEngulf or bullReject or bullDrive
+bearTrig = bearEngulf or bearReject or bearDrive
+trigTxt = bullEngulf or bearEngulf ? "engulf" :
+     bullReject or bearReject ? "rejection" :
+     bullDrive or bearDrive ? "drive" : "none"
+
+// SWEEP: wick through liquidity, close back inside. Prior-day levels count too.
+sweptLoLevel = not na(pdl) and low < pdl and low >= liqLo ? pdl : liqLo
+sweptHiLevel = not na(pdh) and high > pdh and high <= liqHi ? pdh : liqHi
+bullSweep = allowSweep and not na(sweptLoLevel) and low < sweptLoLevel and
+     close > sweptLoLevel and close > open
+bearSweep = allowSweep and not na(sweptHiLevel) and high > sweptHiLevel and
+     close < sweptHiLevel and close < open
+
+// PULLBACK: trend intact, price returned to the value band, closed back out.
+bandTop = math.max(ema9, ema20)
+bandBot = math.min(ema9, ema20)
+taggedLong = low <= bandTop + tol or (vwapOk and low <= vwap + tol)
+taggedShort = high >= bandBot - tol or (vwapOk and high >= vwap - tol)
+extATR = atr > 0 ? math.abs(close - ema9) / atr : 0.0
+notExt = extATR <= maxExtATR
+bullPull = allowPullback and emaBull and taggedLong and close > ema20 and notExt
+bearPull = allowPullback and emaBear and taggedShort and close < ema20 and notExt
+
+// BREAK-RETEST: structure broke, price came back to the level and held it.
+bullRetest = allowRetest and not na(retestUp) and
+     bar_index - retestUpBar <= retestBars and bar_index > retestUpBar and
+     low <= retestUp + tol and close > retestUp
+bearRetest = allowRetest and not na(retestDn) and
+     bar_index - retestDnBar <= retestBars and bar_index > retestDnBar and
+     high >= retestDn - tol and close < retestDn
+
+longSetup = bullSweep ? "SWEEP" : bullRetest ? "BREAK-RETEST" :
+     bullPull ? "PULLBACK" : ""
+shortSetup = bearSweep ? "SWEEP" : bearRetest ? "BREAK-RETEST" :
+     bearPull ? "PULLBACK" : ""
+
+// ═════════════════════════════ RISK GEOMETRY ════════════════════════════════
+
+spreadPrice = spreadPips * pipSize
+buffer = spreadPrice * 1.5
+swingLo3 = ta.lowest(low, 3)
+swingHi3 = ta.highest(high, 3)
+
+// Structural stop per setup, then an ATR floor so noise cannot produce an
+// unusable stop, then a spread buffer so the quote itself does not stop you.
+stopRefLong = bullSweep ? low : bullRetest and not na(retestUp) ? math.min(low, retestUp) : swingLo3
+stopRefShort = bearSweep ? high : bearRetest and not na(retestDn) ? math.max(high, retestDn) : swingHi3
+riskLong = math.max(close - stopRefLong, atr * stopFloorATR) + buffer
+riskShort = math.max(stopRefShort - close, atr * stopFloorATR) + buffer
+
+// Room ahead: only levels actually in front of price can act as a wall.
+big = math.max(atr * 1000.0, 1.0)
+roomUp = math.min(not na(liqHi) and liqHi > close ? liqHi - close : big,
+     not na(pdh) and pdh > close ? pdh - close : big)
+roomDn = math.min(not na(liqLo) and liqLo < close ? close - liqLo : big,
+     not na(pdl) and pdl < close ? close - pdl : big)
+
+tp1Long = close + riskLong * rr1
+tp1Short = close - riskShort * rr1
+tp2Long = close + math.min(math.max(roomUp, riskLong * rr1 * 1.5), riskLong * maxR)
+tp2Short = close - math.min(math.max(roomDn, riskShort * rr1 * 1.5), riskShort * maxR)
+
+minTpPrice = spreadPips * minTpSpread * pipSize
+tpOkLong = riskLong * rr1 >= minTpPrice
+tpOkShort = riskShort * rr1 >= minTpPrice
+roomOkLong = roomUp >= riskLong * rr1
+roomOkShort = roomDn >= riskShort * rr1
+
+// Position sizing. The broker's minimum lot is the binding constraint on a
+// small account: below it you cannot reduce risk any further.
+riskCash = acctSize * riskPct / 100.0
+pipPerLot = pipSize * contractSize
+maxStopPips = pipPerLot > 0 ? riskCash / (minLot * pipPerLot) : na
+lotsFor(float riskPrice) =>
+    float sp = pipSize > 0 ? riskPrice / pipSize : na
+    float raw = not na(sp) and sp > 0 and pipPerLot > 0 ? riskCash / (sp * pipPerLot) : na
+    na(raw) ? na : math.max(math.floor(raw / minLot) * minLot, minLot)
+cashRisk(float riskPrice, float lots) =>
+    float sp = pipSize > 0 ? riskPrice / pipSize : na
+    na(sp) or na(lots) ? na : sp * lots * pipPerLot
+
+sizeOkLong = not na(maxStopPips) and riskLong / pipSize <= maxStopPips
+sizeOkShort = not na(maxStopPips) and riskShort / pipSize <= maxStopPips
+
+// ══════════════════════════════ SCORING ═════════════════════════════════════
+// Weights total 100. Structure and location outrank momentum on purpose:
+// momentum decides when, structure decides whether.
+
+setupScore(string s) =>
+    s == "SWEEP" ? 20 : s == "BREAK-RETEST" ? 16 : s == "PULLBACK" ? 14 : 0
+
+scoreSide(int dir) =>
+    bool bull = dir == 1
+    string setup = bull ? longSetup : shortSetup
+    int sc = 0
+    sc += (bull ? macroBias >= 0 : macroBias <= 0) ? (macroBias == 0 ? 8 : 15) : 0
+    sc += (bull ? dirBias == 1 : dirBias == -1) ? 20 : (dirBias == 0 ? 8 : 0)
+    sc += (bull ? setupBias >= 0 : setupBias <= 0) ? 8 : 0
+    sc += (bull ? structDir >= 0 : structDir <= 0) ? 7 : 0
+    sc += setupScore(setup)
+    // Location: at a level, at value, or on the right side of VWAP
+    bool atLevel = bull ? (not na(liqLo) and math.abs(low - liqLo) <= tol * 2) :
+         (not na(liqHi) and math.abs(high - liqHi) <= tol * 2)
+    bool atValue = bull ? taggedLong : taggedShort
+    bool vwapSide = not vwapOk or (bull ? close > vwap : close < vwap)
+    sc += (atLevel ? 4 : 0) + (atValue ? 3 : 0) + (vwapSide ? 3 : 0)
+    // Momentum: direction plus a not-already-exhausted check
+    bool rsiDir = bull ? rsiUp : rsiDn
+    bool rsiRoom = bull ? rsi < rsiChase : rsi > 100.0 - rsiChase
+    sc += (rsiDir ? 5 : 0) + (rsiRoom ? 5 : 0)
+    sc += volKnown ? (volOk ? 5 : 0) : 3
+    sc += (bull ? roomOkLong : roomOkShort) ? 5 : 0
+    sc
+
+longScore = scoreSide(1)
+shortScore = scoreSide(-1)
+
+// ══════════════════════════ HARD REQUIREMENTS ═══════════════════════════════
+// Any failure here means NO TRADE, whatever the score says.
+
+reqLong = tfOk and sessionOk and not dead and longSetup != "" and bullTrig and
+     tpOkLong and sizeOkLong and not (macroBias == -1 and dirBias == -1) and
+     rsi < rsiChase
+reqShort = tfOk and sessionOk and not dead and shortSetup != "" and bearTrig and
+     tpOkShort and sizeOkShort and not (macroBias == 1 and dirBias == 1) and
+     rsi > 100.0 - rsiChase
+
+// A sweep may fight the 1H bias (a stop-run into daily support is a real scalp)
+// but never both higher timeframes at once.
+sweepException(int dir) =>
+    bool bull = dir == 1
+    (bull ? bullSweep : bearSweep) and (bull ? macroBias >= 0 : macroBias <= 0)
+alignLong = dirBias >= 0 or sweepException(1)
+alignShort = dirBias <= 0 or sweepException(-1)
+
+var int lastSigBar = -9999
+coolOk = bar_index - lastSigBar >= cooldown
+confirmed = barstate.isconfirmed
+
+rawLong = confirmed and reqLong and alignLong and coolOk and longScore >= thLong
+rawShort = confirmed and reqShort and alignShort and coolOk and shortScore >= thLong
+sigLong = rawLong and not rawShort
+sigShort = rawShort and not rawLong
+strongLong = sigLong and longScore >= thStrong
+strongShort = sigShort and shortScore >= thStrong
+
+// Why nothing is firing. Reported for whichever side has the better score.
+blocker(int dir) =>
+    bool bull = dir == 1
+    string setup = bull ? longSetup : shortSetup
+    not tfOk ? "chart above " + str.tostring(maxChartMin) + "m — wrong tool" :
+     dead ? "DEAD volatility (ATR " + str.tostring(atrPips, "#.#") + " pips)" :
+     not sessionOk ? "outside killzone" :
+     regime == "SQUEEZE" ? "squeeze — waiting for expansion" :
+     (bull ? macroBias == -1 and dirBias == -1 : macroBias == 1 and dirBias == 1) ?
+     "both HTFs against" :
+     not (bull ? alignLong : alignShort) ? "1H bias against" :
+     setup == "" ? "no setup (need sweep / pullback / retest)" :
+     not (bull ? bullTrig : bearTrig) ? "no trigger candle" :
+     not (bull ? sizeOkLong : sizeOkShort) ?
+     "stop " + str.tostring((bull ? riskLong : riskShort) / pipSize, "#.#") +
+     " pips > " + str.tostring(maxStopPips, "#.#") + " max for $" +
+     str.tostring(acctSize, "#") :
+     not (bull ? tpOkLong : tpOkShort) ? "TP1 below spread filter" :
+     not coolOk ? "cooldown" :
+     (bull ? longScore : shortScore) < thLong ?
+     "score " + str.tostring(bull ? longScore : shortScore) + " < " + str.tostring(thLong) :
+     "ready"
+
+sideForBlocker = longScore >= shortScore ? 1 : -1
+blockTxt = sigLong or sigShort ? "SIGNAL FIRED" : blocker(sideForBlocker)
+
+signalTxt = strongLong ? "🟢 STRONG LONG" : sigLong ? "🟢 LONG" :
+     strongShort ? "🔴 STRONG SHORT" : sigShort ? "🔴 SHORT" : "⚪ WAIT / NO TRADE"
+signalCol = sigLong ? cBull : sigShort ? cBear : cNeut
+
+// ═══════════════════════════ TRADE TRACKING ═════════════════════════════════
+// One trade at a time — correct for this account size, and it makes the
+// TP1/TP2/SL alerts unambiguous.
+
+var int tDir = 0
+var float tEntry = na
+var float tSL = na
+var float tTP1 = na
+var float tTP2 = na
+var bool tTP1Hit = false
+var int tBar = na
+
+hitTP1 = false
+hitTP2 = false
+hitSL = false
+hitTime = false
+
+if tDir != 0 and confirmed
+    if tDir == 1
+        if not tTP1Hit and high >= tTP1
+            tTP1Hit := true
+            hitTP1 := true
+        if high >= tTP2
+            hitTP2 := true
+        if low <= tSL
+            hitSL := true
+    else
+        if not tTP1Hit and low <= tTP1
+            tTP1Hit := true
+            hitTP1 := true
+        if low <= tTP2
+            hitTP2 := true
+        if high >= tSL
+            hitSL := true
+    if bar_index - tBar >= maxHoldBars
+        hitTime := true
+    if hitTP2 or hitSL or hitTime
+        tDir := 0
+
+if sigLong or sigShort
+    lastSigBar := bar_index
+    tDir := sigLong ? 1 : -1
+    tEntry := close
+    tSL := sigLong ? close - riskLong : close + riskShort
+    tTP1 := sigLong ? tp1Long : tp1Short
+    tTP2 := sigLong ? tp2Long : tp2Short
+    tTP1Hit := false
+    tBar := bar_index
+
+tradeState = tDir == 0 ? "flat" : (tTP1Hit ? "TP1 HIT — stop at BE" : "running")
+
+// ══════════════════════════════ DRAWING ═════════════════════════════════════
+
+var array<line> tradeLines = array.new<line>()
+var array<label> sigLabels = array.new<label>()
+
+pushLine(line l) =>
+    array.push(tradeLines, l)
+    if array.size(tradeLines) > 16
+        line.delete(array.shift(tradeLines))
+
+drawTrade(int dir, float e, float sl, float t1, float t2, int score, string setup) =>
+    int rt = bar_index + maxHoldBars
+    color c = dir == 1 ? cBull : cBear
+    pushLine(line.new(bar_index, e, rt, e, xloc = xloc.bar_index,
+         color = color.new(cEntry, 30), width = 1))
+    pushLine(line.new(bar_index, sl, rt, sl, xloc = xloc.bar_index,
+         color = cSL, style = line.style_dashed, width = 2))
+    pushLine(line.new(bar_index, t1, rt, t1, xloc = xloc.bar_index,
+         color = cTP, style = line.style_dashed, width = 2))
+    pushLine(line.new(bar_index, t2, rt, t2, xloc = xloc.bar_index,
+         color = color.new(cTP, 45), style = line.style_dotted, width = 2))
+    float lots = lotsFor(math.abs(e - sl))
+    label lb = label.new(bar_index, dir == 1 ? low : high,
+         (dir == 1 ? "LONG " : "SHORT ") + str.tostring(score) + "  " + setup,
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = dir == 1 ? label.style_label_up : label.style_label_down,
+         color = c, textcolor = color.white, size = size.small,
+         tooltip = (dir == 1 ? "LONG" : "SHORT") + "  score " + str.tostring(score) +
+         "  setup " + setup + "\nEntry " + str.tostring(e, format.mintick) +
+         "\nSL " + str.tostring(sl, format.mintick) + "  (" +
+         str.tostring(math.abs(e - sl) / pipSize, "#.#") + " pips)" +
+         "\nTP1 " + str.tostring(t1, format.mintick) +
+         "\nTP2 " + str.tostring(t2, format.mintick) +
+         "\nSize " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot  risk $" +
+         str.tostring(cashRisk(math.abs(e - sl), lots), "#.##")) +
+         "\nTime stop " + str.tostring(maxHoldBars) + " bars" +
+         "\n\nScore is confluence quality, not a win rate.")
+    array.push(sigLabels, lb)
+    if array.size(sigLabels) > 60
+        label.delete(array.shift(sigLabels))
+
+if showTrade and sigLong
+    drawTrade(1, close, tSL, tTP1, tTP2, longScore, longSetup)
+if showTrade and sigShort
+    drawTrade(-1, close, tSL, tTP1, tTP2, shortScore, shortSetup)
+
+plotshape(sigLong and not strongLong, "Long", shape.triangleup,
+     location.belowbar, cBull, size = size.tiny)
+plotshape(strongLong, "Strong Long", shape.labelup, location.belowbar,
+     cBull, text = "▲", textcolor = color.white, size = size.small)
+plotshape(sigShort and not strongShort, "Short", shape.triangledown,
+     location.abovebar, cBear, size = size.tiny)
+plotshape(strongShort, "Strong Short", shape.labeldown, location.abovebar,
+     cBear, text = "▼", textcolor = color.white, size = size.small)
+// location.absolute needs a price, not a bool — a bool series would plot the
+// marker at price 0.
+plotshape(showStruct and confirmed and bullSweep ? low - atr * 0.3 : na,
+     "Bull sweep", shape.xcross, location.absolute, cSweep, size = size.tiny)
+plotshape(showStruct and confirmed and bearSweep ? high + atr * 0.3 : na,
+     "Bear sweep", shape.xcross, location.absolute, cSweep, size = size.tiny)
+
+// Structure marks. Lines are bounded to the swing they broke rather than
+// extended to the right edge, which is what makes these charts unreadable.
+var array<line> structLines = array.new<line>()
+var array<label> structLabels = array.new<label>()
+
+drawBreak(int dir, float lvl, int fromBar, bool isChoch) =>
+    color c = isChoch ? cChoch : (dir == 1 ? cBull : cBear)
+    line l = line.new(na(fromBar) ? bar_index - 1 : fromBar, lvl, bar_index + 3, lvl,
+         xloc = xloc.bar_index, color = color.new(c, 20),
+         style = isChoch ? line.style_dashed : line.style_solid, width = 2)
+    label lb = label.new(bar_index, lvl,
+         (isChoch ? "CHoCH " : "BOS ") + (dir == 1 ? "▲" : "▼"),
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = dir == 1 ? label.style_label_down : label.style_label_up,
+         color = color.new(c, 15), textcolor = color.white, size = size.tiny,
+         tooltip = isChoch ?
+         "Change of Character: first break AGAINST the previous structure. Trend-flip warning." :
+         "Break of Structure: the existing trend pushed through a swing. Continuation.")
+    array.push(structLines, l)
+    array.push(structLabels, lb)
+    if array.size(structLines) > 4
+        line.delete(array.shift(structLines))
+    if array.size(structLabels) > 4
+        label.delete(array.shift(structLabels))
+
+if showStruct and confirmed and bosUp
+    drawBreak(1, brokeHi, swHiBar, chochUp)
+if showStruct and confirmed and bosDn
+    drawBreak(-1, brokeLo, swLoBar, chochDn)
+
+// Plots. Each line has a distinct hue AND a distinct weight or style.
+plot(showEMA ? ema9 : na, "EMA 9 — yellow", cE9, 2)
+plot(showEMA ? ema20 : na, "EMA 20 — magenta", cE20, 2)
+plot(showEMA ? ema50 : na, "EMA 50 — sky blue", cE50, 2)
+plot(showEMA ? ema200 : na, "EMA 200 — grey", cE200, 3)
+plot(showVWAP and vwapOk ? vwap : na, "VWAP — cyan", cVwap, 3)
+bbu = plot(showBB ? bbUp : na, "BB upper — purple", color.new(cBB, 30), 1)
+bbl = plot(showBB ? bbLo : na, "BB lower — purple", color.new(cBB, 30), 1)
+fill(bbu, bbl, color = color.new(cBB, 93), title = "BB channel")
+plot(showBB ? bbBasis : na, "BB basis — purple dots", color.new(cBB, 10), 1,
+     plot.style_circles)
+plot(showLevels ? liqLo : na, "Liquidity low / support — green", color.new(cSup, 20),
+     2, plot.style_stepline)
+plot(showLevels ? liqHi : na, "Liquidity high / resistance — red", color.new(cRes, 20),
+     2, plot.style_stepline)
+plot(showLevels and dayIsHigher ? pdl : na, "Prev day low — green dots",
+     color.new(cSup, 45), 1, plot.style_circles)
+plot(showLevels and dayIsHigher ? pdh : na, "Prev day high — red dots",
+     color.new(cRes, 45), 1, plot.style_circles)
+
+// Higher-timeframe bias tint: faint green only when 1D and 1H fully agree.
+bgcolor(macroBias == 1 and dirBias == 1 ? color.new(cBull, 94) :
+     macroBias == -1 and dirBias == -1 ? color.new(cBear, 94) : na,
+     title = "HTF bias tint")
+
+// ════════════════════════════════ ALERTS ════════════════════════════════════
+
+msgLong = "SCALPER PRO LONG " + syminfo.ticker + " " + timeframe.period
+msgShort = "SCALPER PRO SHORT " + syminfo.ticker + " " + timeframe.period
+
+alertcondition(strongLong, "Strong Long", "Strong long setup confirmed.")
+alertcondition(sigLong and not strongLong, "Long", "Long setup confirmed.")
+alertcondition(strongShort, "Strong Short", "Strong short setup confirmed.")
+alertcondition(sigShort and not strongShort, "Short", "Short setup confirmed.")
+alertcondition(confirmed and (bullSweep or bearSweep), "Liquidity Sweep",
+     "Liquidity sweep detected.")
+alertcondition(confirmed and (bosUp or bosDn), "Break of Structure",
+     "Break of structure confirmed.")
+alertcondition(confirmed and (chochUp or chochDn), "Market Structure Shift",
+     "CHoCH — market structure shift confirmed.")
+alertcondition(hitTP1, "TP1 hit", "TP1 reached — take partial, stop to break-even.")
+alertcondition(hitTP2, "TP2 hit", "TP2 reached — trade closed.")
+alertcondition(hitSL, "Stop loss hit", "Stop loss hit — trade closed.")
+alertcondition(hitTime, "Time stop", "Time stop reached — close the trade.")
+alertcondition(ta.change(macroBias) != 0, "Macro trend change",
+     "1D macro bias changed.")
+alertcondition(ta.change(dirBias) != 0, "Direction change", "1H bias changed.")
+
+if sigLong or sigShort
+    float lots = lotsFor(sigLong ? riskLong : riskShort)
+    alert((sigLong ? msgLong : msgShort) + " · score " +
+         str.tostring(sigLong ? longScore : shortScore) + " · " +
+         (sigLong ? longSetup : shortSetup) + " · entry " +
+         str.tostring(close, format.mintick) + " · SL " +
+         str.tostring(tSL, format.mintick) + " · TP1 " +
+         str.tostring(tTP1, format.mintick) + " · TP2 " +
+         str.tostring(tTP2, format.mintick) + " · size " +
+         (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot"),
+         alert.freq_once_per_bar_close)
+
+// ════════════════════════════════ PANEL ═════════════════════════════════════
+
+var table pnl = table.new(position.top_right, 2, 16, border_width = 1)
+
+pr(int r, string k, string v, color bg) =>
+    table.cell(pnl, 0, r, k, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left)
+    table.cell(pnl, 1, r, v, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left, bgcolor = bg)
+
+drawPanel() =>
+    int sc = math.max(longScore, shortScore)
+    int sd = longScore >= shortScore ? 1 : -1
+    float rk = sd == 1 ? riskLong : riskShort
+    float lots = lotsFor(rk)
+    float cash = cashRisk(rk, lots)
+    bool tooBig = not na(cash) and cash > riskCash * 1.05
+    color none = color.new(color.black, 65)
+    table.cell(pnl, 0, 0, "SCALPER PRO", text_color = color.white,
+         bgcolor = color.new(color.black, 10), text_size = size.small)
+    table.cell(pnl, 1, 0, signalTxt, text_color = color.white,
+         bgcolor = color.new(signalCol, 25), text_size = size.small)
+    pr(1, "Score", str.tostring(sc) + " / 100   (L " + str.tostring(longScore) +
+         " · S " + str.tostring(shortScore) + ")", none)
+    pr(2, "Waiting on", blockTxt, color.new(sigLong or sigShort ? cBull : color.orange, 55))
+    pr(3, "1D macro", biasTxt(macroBias),
+         color.new(macroBias == 1 ? cBull : macroBias == -1 ? cBear : cNeut, 60))
+    pr(4, "1H direction", biasTxt(dirBias),
+         color.new(dirBias == 1 ? cBull : dirBias == -1 ? cBear : cNeut, 60))
+    pr(5, tfSetup + "M setup", biasTxt(setupBias) + "  ·  " + structTxt, none)
+    pr(6, "Regime", regime + "  (BBW " + str.tostring(bbwRank, "#") + "%)",
+         color.new(regime == "DEAD" or regime == "SQUEEZE" ? cBear : cNeut, 60))
+    pr(7, "Setup", (longSetup != "" ? "L: " + longSetup + " " : "") +
+         (shortSetup != "" ? "S: " + shortSetup : "") +
+         (longSetup == "" and shortSetup == "" ? "none" : ""), none)
+    pr(8, "Trigger", trigTxt, none)
+    pr(9, "Momentum", "RSI " + str.tostring(rsi, "#.#") +
+         (rsi >= rsiChase ? "  ⚠ too high to buy" :
+         rsi <= 100.0 - rsiChase ? "  ⚠ too low to sell" : ""), none)
+    pr(10, "Volume", not volKnown ? "n/a" : volOk ? "confirmed" : "below average", none)
+    pr(11, "Volatility", "ATR " + str.tostring(atrPips, "#.#") + " pips  ·  ext " +
+         str.tostring(extATR, "#.##") + " ATR", none)
+    pr(12, "Stop / target", str.tostring(rk / pipSize, "#.#") + " pips  →  TP1 " +
+         str.tostring(rk * rr1 / pipSize, "#.#") + " pips", none)
+    pr(13, "Size ($" + str.tostring(acctSize, "#") + " @ " +
+         str.tostring(riskPct, "#.#") + "%)",
+         na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot  ·  $" +
+         str.tostring(cash, "#.##") + (tooBig ? "  ⚠ TOO BIG" : ""),
+         tooBig ? color.new(cBear, 35) : none)
+    pr(14, "Max stop", na(maxStopPips) ? "n/a" :
+         str.tostring(maxStopPips, "#.#") + " pips at " + str.tostring(minLot) + " lot", none)
+    pr(15, "Trade", tradeState, none)
+
+if barstate.islast and showPanel
+    drawPanel()
+
+// ════════════════════════════════ LEGEND ════════════════════════════════════
+
+var table leg = table.new(position.bottom_left, 2, 12, border_width = 1)
+
+lr(int r, string name, color sw) =>
+    table.cell(leg, 0, r, "", bgcolor = sw, width = 1)
+    table.cell(leg, 1, r, name, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left)
+
+drawLegend() =>
+    table.cell(leg, 0, 0, "KEY", text_color = color.white,
+         bgcolor = color.new(color.black, 10), text_size = size.tiny)
+    table.cell(leg, 1, 0, "line colours", text_color = color.white, text_size = size.tiny)
+    lr(1, "EMA 9", cE9)
+    lr(2, "EMA 20", cE20)
+    lr(3, "EMA 50", cE50)
+    lr(4, "EMA 200 (thick)", cE200)
+    lr(5, "VWAP (thickest)", cVwap)
+    lr(6, "Bollinger (purple)", cBB)
+    lr(7, "Support / liq low · prev-day dots", cSup)
+    lr(8, "Resistance / liq high · prev-day dots", cRes)
+    lr(9, "BOS solid ▲▼ · CHoCH dashed", cChoch)
+    lr(10, "Sweep ✕ · entry white, SL red, TP green", cSweep)
+    lr(11, "RSI is a panel number, not a line", color.new(cNeut, 30))
+
+if barstate.islast and showLegend
+    drawLegend()
