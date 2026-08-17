@@ -110,6 +110,10 @@ watchExpiry = input.int(10, "WATCH expires after (bars)", group = gRV,
      minval = 2, maxval = 50)
 confirmWindow = input.int(5, "Bars allowed between CONFIRM and trigger",
      group = gRV, minval = 1, maxval = 20)
+revStopMode = input.string("Auto - fit the account", "Reversal stop", group = gRV,
+     options = ["Auto - fit the account", "Swept extreme (safest)",
+     "Recent 3-bar swing (tightest)"],
+     tooltip = "The swept extreme is structurally correct but can be far away. Auto uses it when your risk budget can afford it and falls back to the tighter 3-bar swing when it cannot.")
 
 gSS = "4  Session filter"
 useSession = input.bool(true, "Trade killzones only", group = gSS)
@@ -503,6 +507,7 @@ var float rvMss = na
 var int rvMssBar = na
 var string rvType = ""
 var int rvEv = 0
+var bool rvDaily = false
 
 // A WATCH dies if it times out, or if price simply carries on making new
 // extremes — that is the sweep failing, and it is the honest answer.
@@ -521,17 +526,21 @@ if confirmed and useReversal
         rvDir := 1
         rvBar := bar_index
         rvExtreme := low
-        rvMss := na(swHi) ? hi5 : swHi
+        // The NEARER level above: a micro lower high confirms far sooner than
+        // the last major swing, which keeps the entry close to the invalidation.
+        rvMss := na(swHi) ? hi5 : math.min(swHi, hi5)
         rvType := bullSweep ? "SWEEP-REV" : "EXH-REV"
         rvEv := evBull
+        rvDaily := not na(pdl) and low <= pdl
     if rvStage == 0 and (bearSweep or exhBear) and not (bullSweep or exhBull)
         rvStage := 1
         rvDir := -1
         rvBar := bar_index
         rvExtreme := high
-        rvMss := na(swLo) ? lo5 : swLo
+        rvMss := na(swLo) ? lo5 : math.max(swLo, lo5)
         rvType := bearSweep ? "SWEEP-REV" : "EXH-REV"
         rvEv := evBear
+        rvDaily := not na(pdh) and high >= pdh
     // Stage 2: market structure shift — the opposing swing gave way.
     if rvStage == 1 and not na(rvMss)
         bool shifted = rvDir == 1 ? close > rvMss : close < rvMss
@@ -555,6 +564,12 @@ isRevSetup = revLong or revShort
 
 // ═════════════════════════════ RISK GEOMETRY ════════════════════════════════
 
+// The broker's minimum lot is the binding constraint on a small account: below
+// it you cannot reduce risk any further, so this caps the affordable stop.
+riskCash = acctSize * riskPct / 100.0
+pipPerLot = pipSize * contractSize
+maxStopPips = pipPerLot > 0 ? riskCash / (minLot * pipPerLot) : na
+
 spreadPrice = spreadPips * pipSize
 buffer = spreadPrice * 1.5
 swingLo3 = ta.lowest(low, 3)
@@ -562,11 +577,24 @@ swingHi3 = ta.highest(high, 3)
 
 // Structural stop per setup, then an ATR floor so noise cannot produce an
 // unusable stop, then a spread buffer so the quote itself does not stop you.
-// For a reversal the invalidation is the swept extreme itself: if price trades
-// back through it, the thesis is dead and there is nothing to hold on to.
-stopRefLong = revLong and not na(rvExtreme) ? math.min(low, rvExtreme) :
+// For a reversal the true invalidation is the swept extreme: trade back through
+// it and the thesis is dead. But on a small account that stop is often wider
+// than the risk budget allows, so Auto falls back to the 3-bar swing rather
+// than silently producing no signals at all.
+revWideL = not na(rvExtreme) ? math.min(low, rvExtreme) : swingLo3
+revWideS = not na(rvExtreme) ? math.max(high, rvExtreme) : swingHi3
+wideFitsL = na(maxStopPips) or (close - revWideL + buffer) / pipSize <= maxStopPips
+wideFitsS = na(maxStopPips) or (revWideS - close + buffer) / pipSize <= maxStopPips
+revRefL = revStopMode == "Swept extreme (safest)" ? revWideL :
+     revStopMode == "Recent 3-bar swing (tightest)" ? swingLo3 :
+     wideFitsL ? revWideL : swingLo3
+revRefS = revStopMode == "Swept extreme (safest)" ? revWideS :
+     revStopMode == "Recent 3-bar swing (tightest)" ? swingHi3 :
+     wideFitsS ? revWideS : swingHi3
+
+stopRefLong = revLong ? revRefL :
      bullRetest and not na(retestUp) ? math.min(low, retestUp) : swingLo3
-stopRefShort = revShort and not na(rvExtreme) ? math.max(high, rvExtreme) :
+stopRefShort = revShort ? revRefS :
      bearRetest and not na(retestDn) ? math.max(high, retestDn) : swingHi3
 riskLong = math.max(close - stopRefLong, atr * stopFloorATR) + buffer
 riskShort = math.max(stopRefShort - close, atr * stopFloorATR) + buffer
@@ -589,11 +617,6 @@ tpOkShort = riskShort * rr1 >= minTpPrice
 roomOkLong = roomUp >= riskLong * rr1
 roomOkShort = roomDn >= riskShort * rr1
 
-// Position sizing. The broker's minimum lot is the binding constraint on a
-// small account: below it you cannot reduce risk any further.
-riskCash = acctSize * riskPct / 100.0
-pipPerLot = pipSize * contractSize
-maxStopPips = pipPerLot > 0 ? riskCash / (minLot * pipPerLot) : na
 lotsFor(float riskPrice) =>
     float sp = pipSize > 0 ? riskPrice / pipSize : na
     float raw = not na(sp) and sp > 0 and pipPerLot > 0 ? riskCash / (sp * pipPerLot) : na
@@ -615,20 +638,39 @@ setupScore(string s) =>
     s == "SWEEP-REV" or s == "EXH-REV" ? 16 + math.min(6, rvEv) :
      s == "BREAK-RETEST" ? 16 : s == "PULLBACK" ? 14 : 0
 
+// A continuation setup wants the higher timeframes to AGREE. A reversal cannot
+// have that by definition — so scoring it on agreement made a counter-trend
+// reversal mathematically unable to reach the threshold, and it sat at CONFIRM
+// forever. For reversals the same points are earned by the higher timeframe
+// being STRETCHED the other way, which is the fuel for the reversal.
 scoreSide(int dir) =>
     bool bull = dir == 1
     string setup = bull ? longSetup : shortSetup
+    bool isRev = setup == "SWEEP-REV" or setup == "EXH-REV"
+    bool h1Spent = bull ? hRsi < 40 : hRsi > 60
     int sc = 0
-    sc += (bull ? macroBias >= 0 : macroBias <= 0) ? (macroBias == 0 ? 8 : 15) : 0
-    sc += (bull ? dirBias == 1 : dirBias == -1) ? 20 : (dirBias == 0 ? 8 : 0)
-    sc += (bull ? setupBias >= 0 : setupBias <= 0) ? 8 : 0
+    if isRev
+        // 1D: agreeing is best; disagreeing is acceptable only when the sweep
+        // took an actual daily level, which is the classic reversal location.
+        sc += (bull ? macroBias >= 0 : macroBias <= 0) ? 15 : rvDaily ? 11 : 4
+        // 1H: agreeing, or visibly exhausted in the opposite direction.
+        sc += (bull ? dirBias >= 0 : dirBias <= 0) ? 20 : h1Spent ? 16 : 5
+        // Being on the far side of the 5M mean is normal at a reversal point.
+        sc += (bull ? setupBias >= 0 : setupBias <= 0) ? 8 : 5
+    else
+        sc += (bull ? macroBias >= 0 : macroBias <= 0) ? (macroBias == 0 ? 8 : 15) : 0
+        sc += (bull ? dirBias == 1 : dirBias == -1) ? 20 : (dirBias == 0 ? 8 : 0)
+        sc += (bull ? setupBias >= 0 : setupBias <= 0) ? 8 : 0
     sc += (bull ? structDir >= 0 : structDir <= 0) ? 7 : 0
     sc += setupScore(setup)
-    // Location: at a level, at value, or on the right side of VWAP
+    // Location: at a level, at value, and VWAP. For a reversal the useful VWAP
+    // reading is distance from it (stretched), not which side price sits on.
     bool atLevel = bull ? (not na(liqLo) and math.abs(low - liqLo) <= tol * 2) :
          (not na(liqHi) and math.abs(high - liqHi) <= tol * 2)
     bool atValue = bull ? taggedLong : taggedShort
-    bool vwapSide = not vwapOk or (bull ? close > vwap : close < vwap)
+    bool vwapSide = not vwapOk ? true :
+         isRev ? math.abs(close - vwap) >= atr :
+         (bull ? close > vwap : close < vwap)
     sc += (atLevel ? 4 : 0) + (atValue ? 3 : 0) + (vwapSide ? 3 : 0)
     // Momentum: direction plus a not-already-exhausted check
     bool rsiDir = bull ? rsiUp : rsiDn
@@ -644,20 +686,25 @@ shortScore = scoreSide(-1)
 // ══════════════════════════ HARD REQUIREMENTS ═══════════════════════════════
 // Any failure here means NO TRADE, whatever the score says.
 
-reqLong = tfOk and sessionOk and not dead and longSetup != "" and bullTrig and
-     tpOkLong and sizeOkLong and not (macroBias == -1 and dirBias == -1) and
-     rsi < rsiChase
-reqShort = tfOk and sessionOk and not dead and shortSetup != "" and bearTrig and
-     tpOkShort and sizeOkShort and not (macroBias == 1 and dirBias == 1) and
-     rsi > 100.0 - rsiChase
-
-// A sweep may fight the 1H bias (a stop-run into daily support is a real scalp)
-// but never both higher timeframes at once.
+// A reversal may fight the 1H bias — a stop-run into daily support is a real
+// scalp. Fighting BOTH higher timeframes needs more: a fully-evidenced staged
+// reversal that took an actual daily level. Anything less is a countertrend
+// gamble and stays blocked.
+revCounterOk(int dir) =>
+    (dir == 1 ? revLong : revShort) and rvEv >= minEvidence and rvDaily
 sweepException(int dir) =>
     bool bull = dir == 1
-    (bull ? revLong : revShort) and (bull ? macroBias >= 0 : macroBias <= 0)
+    (bull ? revLong : revShort) and
+     ((bull ? macroBias >= 0 : macroBias <= 0) or revCounterOk(dir))
 alignLong = dirBias >= 0 or sweepException(1)
 alignShort = dirBias <= 0 or sweepException(-1)
+
+reqLong = tfOk and sessionOk and not dead and longSetup != "" and bullTrig and
+     tpOkLong and sizeOkLong and rsi < rsiChase and
+     (not (macroBias == -1 and dirBias == -1) or revCounterOk(1))
+reqShort = tfOk and sessionOk and not dead and shortSetup != "" and bearTrig and
+     tpOkShort and sizeOkShort and rsi > 100.0 - rsiChase and
+     (not (macroBias == 1 and dirBias == 1) or revCounterOk(-1))
 
 var int lastSigBar = -9999
 coolOk = bar_index - lastSigBar >= cooldown
@@ -678,8 +725,11 @@ blocker(int dir) =>
      not sessionOk ? "outside killzone" :
      regime == "SQUEEZE" ? "squeeze — waiting for expansion" :
      (bull ? macroBias == -1 and dirBias == -1 : macroBias == 1 and dirBias == 1) ?
-     "both HTFs against" :
-     not (bull ? alignLong : alignShort) ? "1H bias against" :
+     "both HTFs against — needs a daily-level sweep with " +
+     str.tostring(minEvidence) + "/6 evidence (have " +
+     str.tostring(bull ? evBull : evBear) + ", daily " + (rvDaily ? "yes" : "no") + ")" :
+     not (bull ? alignLong : alignShort) ?
+     "1H bias against — needs a confirmed reversal to override" :
      setup == "" and rvStage == 1 ? "REVERSAL WATCH — waiting for structure shift" :
      setup == "" and rvStage == 2 ? "CONFIRMED — waiting for a trigger candle to close" :
      setup == "" ? "no setup (need reversal / pullback / retest)" :

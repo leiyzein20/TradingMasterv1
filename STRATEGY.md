@@ -297,3 +297,65 @@ starting from zero.
 **The score is confluence quality, not a win probability.** An 88 means the model
 agrees with itself, not that 88% of these win. Only your own backtest produces
 that number.
+
+---
+
+## Addendum — why reversals are scored differently
+
+The first version of the scorer gave 43 of its 100 points to the higher
+timeframes *agreeing* with the trade direction. That is right for a
+continuation setup and completely wrong for a reversal, which by definition
+disagrees with the recent direction.
+
+The arithmetic for a counter-trend bullish reversal was:
+
+| | earned | possible |
+|---|---|---|
+| 1D bias | 0 | 15 |
+| 1H bias | 0 | 20 |
+| 5M bias | 0 | 8 |
+| everything else | 56 | 57 |
+| **total** | **56** | threshold **70** |
+
+A reversal against the higher timeframes could not reach the threshold at any
+level of evidence. The result was a setup that reached CONFIRM and stayed
+there permanently — the indicator saying "waiting for a trigger" forever.
+
+**The fix:** reversals use a different profile for the same points. Instead of
+asking "does the higher timeframe agree", it asks "is the higher timeframe
+*stretched the other way*" — which is the fuel for a reversal, not an argument
+against it.
+
+| Points | Continuation earns it when… | Reversal earns it when… |
+|---|---|---|
+| 1D (15) | 1D agrees | 1D agrees (15), or disagrees but the sweep took a **daily level** (11), else 4 |
+| 1H (20) | 1H agrees | 1H agrees (20), or 1H RSI is exhausted the other way (16), else 5 |
+| 5M (8) | price on the right side of the 5M mean | 8 if it agrees, 5 if not — being the far side of the mean is normal at a turn |
+| VWAP (3) | price on the right side | price **stretched ≥ 1 ATR** from VWAP |
+
+A fully-evidenced counter-trend reversal that swept a daily level now scores
+around 90. One with no daily level and no 1H exhaustion scores about 73 — it
+can still fire, but only with everything else perfect.
+
+**The hard veto changed too.** Trading against *both* higher timeframes was
+flatly blocked. It is now allowed for exactly one case, which is the exception
+the brief asked for: a staged reversal that reached ENTRY, carries at least the
+configured evidence count, **and** swept an actual previous-day level. Anything
+less stays blocked, and the panel says what is missing:
+
+```
+both HTFs against — needs a daily-level sweep with 4/6 evidence (have 3, daily no)
+```
+
+**Two other changes came out of the same investigation:**
+
+- The structure-shift level was the last *major* confirmed swing. After a long
+  push that can be far away, so by the time it broke, the entry was too distant
+  from the swept extreme and the stop no longer fitted the account. It now uses
+  the **nearer** of the major swing and the 5-bar high/low, which confirms
+  sooner and keeps the stop affordable.
+- **Reversal stop** gained a mode. The swept extreme is the structurally correct
+  invalidation, but on a $60 account it is frequently wider than the risk budget
+  allows — which silently produced no signals. `Auto` uses the swept extreme
+  when it fits and falls back to the 3-bar swing when it does not, so you get a
+  tradable stop or an explicit refusal, never silence.
