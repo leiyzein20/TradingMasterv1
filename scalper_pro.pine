@@ -11,10 +11,17 @@
 //   5M  setup           → liquidity pools and structure: WHERE a trade may occur
 //   1-3M execution      → trigger, momentum, stop and target: WHEN
 //
-// THREE SETUPS ONLY
-//   SWEEP        wick through a liquidity level, close back inside
-//   PULLBACK     trend + return to the EMA9/20 band or VWAP + rejection
+// FOUR SETUPS
+//   SWEEP-REV    liquidity swept, then structure shifts back  (staged)
+//   EXH-REV      exhaustion evidence stacks up, then shifts   (staged)
 //   BREAK-RETEST BOS, then price returns to the broken level and holds
+//   PULLBACK     trend + return to the EMA9/20 band or VWAP + rejection
+//
+// REVERSALS RUN THROUGH THREE STAGES — nothing is predicted:
+//   1 WATCH    liquidity taken, or >= N of 6 exhaustion readings agree
+//   2 CONFIRM  market structure shifted: the opposing swing broke
+//   3 ENTRY    a trigger candle CLOSED. Only now is there a BUY/SELL.
+//   A watch dies on timeout or if price simply makes a new extreme.
 //
 // NOT INCLUDED, ON PURPOSE
 //   MACD      — 26-period lookback on a 1m chart confirms after a 3-minute
@@ -80,6 +87,30 @@ minAtrPips = input.float(2.0, "Minimum ATR (pips) to trade", group = gEX,
      minval = 0.1, step = 0.1,
      tooltip = "Below this the market cannot pay the spread. Regime shows DEAD.")
 
+// ── Reversal engine ─────────────────────────────────────────────────────────
+// A reversal is never taken on one candle. It runs through three stages:
+//   WATCH    liquidity swept, or enough exhaustion evidence stacked up
+//   CONFIRM  structure shifted — the previous lower high / higher low broke
+//   ENTRY    a trigger candle CLOSED in the new direction
+// Nothing is predicted. Each stage is a condition that has already happened.
+gRV = "3b Reversal engine"
+useReversal = input.bool(true, "Enable staged reversals", group = gRV)
+useExhaust = input.bool(true, "Also watch exhaustion (not just sweeps)",
+     group = gRV)
+minEvidence = input.int(4, "Exhaustion evidence needed (of 6)", group = gRV,
+     minval = 2, maxval = 6,
+     tooltip = "Extended move, outside Bollinger, rejection candle, RSI divergence, volume/volatility expansion, sweep. More = rarer and cleaner.")
+devATR = input.float(2.0, "Extended = this far from VWAP/EMA20 (x ATR)",
+     group = gRV, minval = 0.5, step = 0.25)
+runBars = input.int(5, "Extended = this many one-way bars", group = gRV,
+     minval = 3, maxval = 20)
+divBars = input.int(30, "RSI divergence valid for (bars)", group = gRV,
+     minval = 5, maxval = 100)
+watchExpiry = input.int(10, "WATCH expires after (bars)", group = gRV,
+     minval = 2, maxval = 50)
+confirmWindow = input.int(5, "Bars allowed between CONFIRM and trigger",
+     group = gRV, minval = 1, maxval = 20)
+
 gSS = "4  Session filter"
 useSession = input.bool(true, "Trade killzones only", group = gSS)
 sessA = input.session("0700-1000", "London", group = gSS)
@@ -117,6 +148,9 @@ showBB = input.bool(false, "Bollinger bands", group = gVI,
      tooltip = "Off by default. The bands are used for regime detection whether or not they are drawn.")
 showLevels = input.bool(true, "Liquidity + S/R levels", group = gVI)
 showStruct = input.bool(true, "BOS / CHoCH marks", group = gVI)
+showStages = input.bool(true, "WATCH / CONFIRM stage markers", group = gVI,
+     tooltip = "Stage 1 and 2 are warnings, not entries. Turn off if you only want the final BUY/SELL.")
+showExits = input.bool(true, "TP1 hit / exit markers", group = gVI)
 showTrade = input.bool(true, "Entry / SL / TP lines", group = gVI)
 showPanel = input.bool(true, "Status panel", group = gVI)
 showLegend = input.bool(true, "Colour legend", group = gVI)
@@ -140,6 +174,16 @@ cSweep = #FFAB00   // amber
 cChoch = #FF9100   // orange
 
 // ═════════════════════════ CORE CALCULATIONS ════════════════════════════════
+
+// Every signal in this script is gated on this: nothing is emitted from a bar
+// that is still forming, so a signal that appears can never disappear.
+confirmed = barstate.isconfirmed
+
+// Candle anatomy, needed by both the exhaustion engine and setup detection.
+body = math.abs(close - open)
+rng = high - low
+upW = high - math.max(close, open)
+loW = math.min(close, open) - low
 
 atr = ta.atr(14)
 ema9 = ta.ema(close, 9)
@@ -308,6 +352,66 @@ if bosDn
     retestDn := swLo
     retestDnBar := bar_index
 
+// ══════════════════════ EXHAUSTION EVIDENCE INPUTS ══════════════════════════
+// Six independent readings. None of them is a signal on its own — the point is
+// that they measure different things, so several agreeing is worth something.
+
+// 1. RSI divergence at confirmed pivots: price made a new extreme, RSI did not.
+var float lastPLp = na
+var float lastPLr = na
+var float lastPHp = na
+var float lastPHr = na
+var int bullDivBar = na
+var int bearDivBar = na
+if not na(pl)
+    float pvRsi = rsi[pivLen]
+    bool d = not na(lastPLp) and pl < lastPLp and pvRsi > lastPLr
+    if d
+        bullDivBar := bar_index
+    lastPLp := pl
+    lastPLr := pvRsi
+if not na(ph)
+    float pvRsi = rsi[pivLen]
+    bool d = not na(lastPHp) and ph > lastPHp and pvRsi < lastPHr
+    if d
+        bearDivBar := bar_index
+    lastPHp := ph
+    lastPHr := pvRsi
+bullDiv = not na(bullDivBar) and bar_index - bullDivBar <= divBars
+bearDiv = not na(bearDivBar) and bar_index - bearDivBar <= divBars
+
+// 2. One-way runs — how many bars price has pushed without a pause.
+var int runUp = 0
+var int runDn = 0
+if close > close[1]
+    runUp := runUp + 1
+    runDn := 0
+if close < close[1]
+    runDn := runDn + 1
+    runUp := 0
+
+// 3. Deviation from the mean, in ATR.
+devVwap = vwapOk and atr > 0 ? (close - vwap) / atr : 0.0
+devEma = atr > 0 ? (close - ema20) / atr : 0.0
+stretchedUp = runUp >= runBars or devVwap >= devATR or devEma >= devATR
+stretchedDn = runDn >= runBars or devVwap <= -devATR or devEma <= -devATR
+
+// 4. Outside the Bollinger envelope — a statistical extreme, not a sell signal.
+outBBUp = high > bbUp
+outBBDn = low < bbLo
+
+// 5. Volatility expansion alongside volume.
+atrSma = ta.sma(atr, 20)
+atrExp = not na(atrSma) and atrSma > 0 and atr > atrSma * 1.15
+expansion = volOk or atrExp
+
+// 6. Displacement — a decisive candle away from the area.
+bodyPct = rng > 0 ? body / rng : 0.0
+displaced = body >= atr * 0.9 and bodyPct >= 0.55
+
+hi5 = ta.highest(high, 5)
+lo5 = ta.lowest(low, 5)
+
 // ═══════════════════════════ REGIME DETECTION ═══════════════════════════════
 
 emaBull = ema9 > ema20 and ema20 > ema50
@@ -327,10 +431,6 @@ allowSweep = regime == "TREND" or regime == "RANGE" or regime == "HIGH VOL"
 
 // ═══════════════════════════ SETUP DETECTION ════════════════════════════════
 
-body = math.abs(close - open)
-rng = high - low
-upW = high - math.max(close, open)
-loW = math.min(close, open) - low
 tol = atr * 0.15
 
 // Trigger candles: the five forms that actually mark a turn on a 1m chart.
@@ -374,10 +474,84 @@ bearRetest = allowRetest and not na(retestDn) and
      bar_index - retestDnBar <= retestBars and bar_index > retestDnBar and
      high >= retestDn - tol and close < retestDn
 
-longSetup = bullSweep ? "SWEEP" : bullRetest ? "BREAK-RETEST" :
+// ═══════════════════════ STAGED REVERSAL ENGINE ═════════════════════════════
+// Evidence is counted, not predicted. Six independent readings; a reversal is
+// only WATCHED when enough of them already agree.
+
+evidence(int dir) =>
+    bool bull = dir == 1
+    int n = 0
+    n += (bull ? stretchedDn : stretchedUp) ? 1 : 0
+    n += (bull ? outBBDn : outBBUp) ? 1 : 0
+    n += (bull ? (bullReject or bullEngulf) : (bearReject or bearEngulf)) ? 1 : 0
+    n += (bull ? bullDiv : bearDiv) ? 1 : 0
+    n += expansion ? 1 : 0
+    n += (bull ? bullSweep : bearSweep) ? 1 : 0
+    n
+
+evBull = evidence(1)
+evBear = evidence(-1)
+exhBull = useExhaust and evBull >= minEvidence
+exhBear = useExhaust and evBear >= minEvidence
+
+// Stage 0 none · 1 WATCH · 2 CONFIRM. Entry clears it back to 0.
+var int rvStage = 0
+var int rvDir = 0
+var int rvBar = na
+var float rvExtreme = na
+var float rvMss = na
+var int rvMssBar = na
+var string rvType = ""
+var int rvEv = 0
+
+// A WATCH dies if it times out, or if price simply carries on making new
+// extremes — that is the sweep failing, and it is the honest answer.
+rvExpired = rvStage != 0 and not na(rvBar) and bar_index - rvBar > watchExpiry
+rvFailed = rvStage != 0 and not na(rvExtreme) and
+     (rvDir == 1 ? low < rvExtreme : high > rvExtreme)
+
+if confirmed and useReversal
+    if rvExpired or rvFailed
+        rvStage := 0
+        rvDir := 0
+        rvType := ""
+    // Stage 1: liquidity taken, or exhaustion evidence stacked up.
+    if rvStage == 0 and (bullSweep or exhBull) and not (bearSweep or exhBear)
+        rvStage := 1
+        rvDir := 1
+        rvBar := bar_index
+        rvExtreme := low
+        rvMss := na(swHi) ? hi5 : swHi
+        rvType := bullSweep ? "SWEEP-REV" : "EXH-REV"
+        rvEv := evBull
+    if rvStage == 0 and (bearSweep or exhBear) and not (bullSweep or exhBull)
+        rvStage := 1
+        rvDir := -1
+        rvBar := bar_index
+        rvExtreme := high
+        rvMss := na(swLo) ? lo5 : swLo
+        rvType := bearSweep ? "SWEEP-REV" : "EXH-REV"
+        rvEv := evBear
+    // Stage 2: market structure shift — the opposing swing gave way.
+    if rvStage == 1 and not na(rvMss)
+        bool shifted = rvDir == 1 ? close > rvMss : close < rvMss
+        if shifted
+            rvStage := 2
+            rvMssBar := bar_index
+
+// Stage 3 is reached in the signal block below when a trigger candle closes.
+revArmed = rvStage == 2 and not na(rvMssBar) and
+     bar_index - rvMssBar <= confirmWindow
+revLong = revArmed and rvDir == 1 and bullTrig
+revShort = revArmed and rvDir == -1 and bearTrig
+
+// Reversal outranks continuation: it is the setup with the defined invalidation
+// and the best entry price relative to its stop.
+longSetup = revLong ? rvType : bullRetest ? "BREAK-RETEST" :
      bullPull ? "PULLBACK" : ""
-shortSetup = bearSweep ? "SWEEP" : bearRetest ? "BREAK-RETEST" :
+shortSetup = revShort ? rvType : bearRetest ? "BREAK-RETEST" :
      bearPull ? "PULLBACK" : ""
+isRevSetup = revLong or revShort
 
 // ═════════════════════════════ RISK GEOMETRY ════════════════════════════════
 
@@ -388,8 +562,12 @@ swingHi3 = ta.highest(high, 3)
 
 // Structural stop per setup, then an ATR floor so noise cannot produce an
 // unusable stop, then a spread buffer so the quote itself does not stop you.
-stopRefLong = bullSweep ? low : bullRetest and not na(retestUp) ? math.min(low, retestUp) : swingLo3
-stopRefShort = bearSweep ? high : bearRetest and not na(retestDn) ? math.max(high, retestDn) : swingHi3
+// For a reversal the invalidation is the swept extreme itself: if price trades
+// back through it, the thesis is dead and there is nothing to hold on to.
+stopRefLong = revLong and not na(rvExtreme) ? math.min(low, rvExtreme) :
+     bullRetest and not na(retestUp) ? math.min(low, retestUp) : swingLo3
+stopRefShort = revShort and not na(rvExtreme) ? math.max(high, rvExtreme) :
+     bearRetest and not na(retestDn) ? math.max(high, retestDn) : swingHi3
 riskLong = math.max(close - stopRefLong, atr * stopFloorATR) + buffer
 riskShort = math.max(stopRefShort - close, atr * stopFloorATR) + buffer
 
@@ -431,8 +609,11 @@ sizeOkShort = not na(maxStopPips) and riskShort / pipSize <= maxStopPips
 // Weights total 100. Structure and location outrank momentum on purpose:
 // momentum decides when, structure decides whether.
 
+// A confirmed reversal scores highest, and scales with how much independent
+// evidence stacked up behind it.
 setupScore(string s) =>
-    s == "SWEEP" ? 20 : s == "BREAK-RETEST" ? 16 : s == "PULLBACK" ? 14 : 0
+    s == "SWEEP-REV" or s == "EXH-REV" ? 16 + math.min(6, rvEv) :
+     s == "BREAK-RETEST" ? 16 : s == "PULLBACK" ? 14 : 0
 
 scoreSide(int dir) =>
     bool bull = dir == 1
@@ -474,13 +655,12 @@ reqShort = tfOk and sessionOk and not dead and shortSetup != "" and bearTrig and
 // but never both higher timeframes at once.
 sweepException(int dir) =>
     bool bull = dir == 1
-    (bull ? bullSweep : bearSweep) and (bull ? macroBias >= 0 : macroBias <= 0)
+    (bull ? revLong : revShort) and (bull ? macroBias >= 0 : macroBias <= 0)
 alignLong = dirBias >= 0 or sweepException(1)
 alignShort = dirBias <= 0 or sweepException(-1)
 
 var int lastSigBar = -9999
 coolOk = bar_index - lastSigBar >= cooldown
-confirmed = barstate.isconfirmed
 
 rawLong = confirmed and reqLong and alignLong and coolOk and longScore >= thLong
 rawShort = confirmed and reqShort and alignShort and coolOk and shortScore >= thLong
@@ -500,13 +680,15 @@ blocker(int dir) =>
      (bull ? macroBias == -1 and dirBias == -1 : macroBias == 1 and dirBias == 1) ?
      "both HTFs against" :
      not (bull ? alignLong : alignShort) ? "1H bias against" :
-     setup == "" ? "no setup (need sweep / pullback / retest)" :
+     setup == "" and rvStage == 1 ? "REVERSAL WATCH — waiting for structure shift" :
+     setup == "" and rvStage == 2 ? "CONFIRMED — waiting for a trigger candle to close" :
+     setup == "" ? "no setup (need reversal / pullback / retest)" :
      not (bull ? bullTrig : bearTrig) ? "no trigger candle" :
      not (bull ? sizeOkLong : sizeOkShort) ?
      "stop " + str.tostring((bull ? riskLong : riskShort) / pipSize, "#.#") +
      " pips > " + str.tostring(maxStopPips, "#.#") + " max for $" +
      str.tostring(acctSize, "#") :
-     not (bull ? tpOkLong : tpOkShort) ? "TP1 below spread filter" :
+     not (bull ? tpOkLong : tpOkShort) ? "🚫 NO TRADE — TARGET TOO SMALL" :
      not coolOk ? "cooldown" :
      (bull ? longScore : shortScore) < thLong ?
      "score " + str.tostring(bull ? longScore : shortScore) + " < " + str.tostring(thLong) :
@@ -515,9 +697,13 @@ blocker(int dir) =>
 sideForBlocker = longScore >= shortScore ? 1 : -1
 blockTxt = sigLong or sigShort ? "SIGNAL FIRED" : blocker(sideForBlocker)
 
-signalTxt = strongLong ? "🟢 STRONG LONG" : sigLong ? "🟢 LONG" :
-     strongShort ? "🔴 STRONG SHORT" : sigShort ? "🔴 SHORT" : "⚪ WAIT / NO TRADE"
-signalCol = sigLong ? cBull : sigShort ? cBear : cNeut
+signalTxt = strongLong ? "🟢 STRONG BUY" : sigLong ? "🟢 BUY" :
+     strongShort ? "🔴 STRONG SELL" : sigShort ? "🔴 SELL" :
+     rvStage == 2 ? (rvDir == 1 ? "🟡 BUY CONFIRMATION" : "🟡 SELL CONFIRMATION") :
+     rvStage == 1 ? (rvDir == 1 ? "⚠️ BULL REVERSAL WATCH" : "⚠️ BEAR REVERSAL WATCH") :
+     "⚪ WAIT / NO TRADE"
+signalCol = sigLong ? cBull : sigShort ? cBear :
+     rvStage == 2 ? #FFEA00 : rvStage == 1 ? cSweep : cNeut
 
 // ═══════════════════════════ TRADE TRACKING ═════════════════════════════════
 // One trade at a time — correct for this account size, and it makes the
@@ -535,8 +721,12 @@ hitTP1 = false
 hitTP2 = false
 hitSL = false
 hitTime = false
+// Captured before the block can reset tDir to 0, so the exit markers still know
+// which side the closing trade was on.
+exitDir = 0
 
 if tDir != 0 and confirmed
+    exitDir := tDir
     if tDir == 1
         if not tTP1Hit and high >= tTP1
             tTP1Hit := true
@@ -567,8 +757,52 @@ if sigLong or sigShort
     tTP2 := sigLong ? tp2Long : tp2Short
     tTP1Hit := false
     tBar := bar_index
+    // The staged reversal has done its job; clear it so the next one starts clean.
+    rvStage := 0
+    rvDir := 0
+    rvType := ""
 
 tradeState = tDir == 0 ? "flat" : (tTP1Hit ? "TP1 HIT — stop at BE" : "running")
+
+// ═══════════════════ STAGE 1 / 2 DISPLAY (watch, confirm) ═══════════════════
+// The whole point of staging: you are told what is forming BEFORE it is
+// tradable, and told plainly to do nothing yet.
+
+newWatch = confirmed and rvStage == 1 and rvStage[1] != 1
+newConfirm = confirmed and rvStage == 2 and rvStage[1] != 2
+
+stageTxt = rvStage == 1 ?
+     (rvDir == 1 ? "⚠️ BULLISH REVERSAL WATCH" : "⚠️ BEARISH REVERSAL WATCH") :
+     rvStage == 2 ?
+     (rvDir == 1 ? "🟡 BUY CONFIRMATION" : "🟡 SELL CONFIRMATION") : "—"
+stageSub = rvStage == 1 ?
+     rvType + " · " + str.tostring(rvEv) + "/6 evidence · waiting for structure shift" :
+     rvStage == 2 ? "structure shifted · waiting for a trigger candle to CLOSE" :
+     "no reversal forming"
+
+var array<label> stageLabels = array.new<label>()
+
+drawStage(int stage, int dir) =>
+    color c = stage == 1 ? cSweep : #FFEA00
+    string txt = stage == 1 ? "WATCH " + (dir == 1 ? "▲" : "▼") :
+         "CONFIRM " + (dir == 1 ? "▲" : "▼")
+    string tip = stage == 1 ?
+         "STAGE 1 — REVERSAL WATCH\n" + rvType + ", " + str.tostring(rvEv) +
+         "/6 evidence.\nLiquidity taken or exhaustion stacked up.\n\nDO NOTHING. Waiting for the structure to shift." :
+         "STAGE 2 — CONFIRMATION\nStructure shifted: the opposing swing broke.\n\nSTILL WAIT. Entry only when a trigger candle CLOSES."
+    label lb = label.new(bar_index, dir == 1 ? low : high, txt,
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = dir == 1 ? label.style_label_up : label.style_label_down,
+         color = color.new(c, 20), textcolor = color.black, size = size.tiny,
+         tooltip = tip)
+    array.push(stageLabels, lb)
+    if array.size(stageLabels) > 40
+        label.delete(array.shift(stageLabels))
+
+if showStages and newWatch
+    drawStage(1, rvDir)
+if showStages and newConfirm
+    drawStage(2, rvDir)
 
 // ══════════════════════════════ DRAWING ═════════════════════════════════════
 
@@ -591,22 +825,33 @@ drawTrade(int dir, float e, float sl, float t1, float t2, int score, string setu
          color = cTP, style = line.style_dashed, width = 2))
     pushLine(line.new(bar_index, t2, rt, t2, xloc = xloc.bar_index,
          color = color.new(cTP, 45), style = line.style_dotted, width = 2))
-    float lots = lotsFor(math.abs(e - sl))
+    float risk = math.abs(e - sl)
+    float lots = lotsFor(risk)
+    float rr2 = risk > 0 ? math.abs(t2 - e) / risk : na
     label lb = label.new(bar_index, dir == 1 ? low : high,
-         (dir == 1 ? "LONG " : "SHORT ") + str.tostring(score) + "  " + setup,
+         (dir == 1 ? "🟢 BUY " : "🔴 SELL ") + str.tostring(score) + "\n" + setup,
          xloc = xloc.bar_index, yloc = yloc.price,
          style = dir == 1 ? label.style_label_up : label.style_label_down,
          color = c, textcolor = color.white, size = size.small,
-         tooltip = (dir == 1 ? "LONG" : "SHORT") + "  score " + str.tostring(score) +
-         "  setup " + setup + "\nEntry " + str.tostring(e, format.mintick) +
-         "\nSL " + str.tostring(sl, format.mintick) + "  (" +
-         str.tostring(math.abs(e - sl) / pipSize, "#.#") + " pips)" +
-         "\nTP1 " + str.tostring(t1, format.mintick) +
-         "\nTP2 " + str.tostring(t2, format.mintick) +
-         "\nSize " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot  risk $" +
-         str.tostring(cashRisk(math.abs(e - sl), lots), "#.##")) +
-         "\nTime stop " + str.tostring(maxHoldBars) + " bars" +
-         "\n\nScore is confluence quality, not a win rate.")
+         tooltip = (dir == 1 ? "🟢 BUY" : "🔴 SELL") +
+         "  —  ENTER AFTER THIS CANDLE CLOSES\n" +
+         "Setup: " + setup + "   Score: " + str.tostring(score) + "/100\n" +
+         "─────────────\n" +
+         "Entry   " + str.tostring(e, format.mintick) + "\n" +
+         "SL      " + str.tostring(sl, format.mintick) + "   (" +
+         str.tostring(risk / pipSize, "#.#") + " pips)\n" +
+         "TP1     " + str.tostring(t1, format.mintick) + "   (" +
+         str.tostring(rr1, "#.#") + "R)\n" +
+         "TP2     " + str.tostring(t2, format.mintick) + "   (" +
+         (na(rr2) ? "n/a" : str.tostring(rr2, "#.#") + "R") + ")\n" +
+         "R:R     1 : " + (na(rr2) ? "n/a" : str.tostring(rr2, "#.#")) + "\n" +
+         "Size    " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot · risk $" +
+         str.tostring(cashRisk(risk, lots), "#.##")) + "\n" +
+         "Time stop " + str.tostring(maxHoldBars) + " bars\n" +
+         "─────────────\n" +
+         "At TP1: take roughly half off and move the stop to break-even.\n" +
+         "Exit at the time stop even if nothing was hit.\n\n" +
+         "Score is confluence quality, NOT a win rate.")
     array.push(sigLabels, lb)
     if array.size(sigLabels) > 60
         label.delete(array.shift(sigLabels))
@@ -615,6 +860,29 @@ if showTrade and sigLong
     drawTrade(1, close, tSL, tTP1, tTP2, longScore, longSetup)
 if showTrade and sigShort
     drawTrade(-1, close, tSL, tTP1, tTP2, shortScore, shortSetup)
+
+// Exit markers. "Take profit because RSI is 70" is not a reason; a level being
+// reached, or the thesis being invalidated, is.
+var array<label> exitLabels = array.new<label>()
+
+drawExit(string txt, string tip, color c, bool above) =>
+    label lb = label.new(bar_index, above ? high : low, txt,
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = above ? label.style_label_down : label.style_label_up,
+         color = color.new(c, 15), textcolor = color.white, size = size.tiny,
+         tooltip = tip)
+    array.push(exitLabels, lb)
+    if array.size(exitLabels) > 40
+        label.delete(array.shift(exitLabels))
+
+if showExits and hitTP1
+    drawExit("🟡 TP1", "TP1 REACHED\nTake roughly half off and move the stop to break-even.\nThe rest runs to TP2 or the time stop.", #FFEA00, exitDir == -1)
+if showExits and hitSL
+    drawExit("⚠️ EXIT", "STOP HIT — thesis invalidated.\nPrice traded through the level the setup depended on. Do not re-enter without a new setup.", cSL, exitDir == 1)
+if showExits and hitTP2
+    drawExit("✅ TP2", "TP2 REACHED — trade closed.", cTP, exitDir == -1)
+if showExits and hitTime
+    drawExit("⏱ TIME", "TIME STOP — close it.\nA scalp that stops moving is a losing scalp holding your margin.", cNeut, exitDir == 1)
 
 plotshape(sigLong and not strongLong, "Long", shape.triangleup,
      location.belowbar, cBull, size = size.tiny)
@@ -695,6 +963,10 @@ alertcondition(strongLong, "Strong Long", "Strong long setup confirmed.")
 alertcondition(sigLong and not strongLong, "Long", "Long setup confirmed.")
 alertcondition(strongShort, "Strong Short", "Strong short setup confirmed.")
 alertcondition(sigShort and not strongShort, "Short", "Short setup confirmed.")
+alertcondition(newWatch, "Stage 1 — Reversal WATCH",
+     "Reversal watch: liquidity swept or exhaustion stacked. Do nothing yet.")
+alertcondition(newConfirm, "Stage 2 — Reversal CONFIRMATION",
+     "Structure shifted. Still wait — entry only when a trigger candle closes.")
 alertcondition(confirmed and (bullSweep or bearSweep), "Liquidity Sweep",
      "Liquidity sweep detected.")
 alertcondition(confirmed and (bosUp or bosDn), "Break of Structure",
@@ -723,7 +995,7 @@ if sigLong or sigShort
 
 // ════════════════════════════════ PANEL ═════════════════════════════════════
 
-var table pnl = table.new(position.top_right, 2, 17, border_width = 1)
+var table pnl = table.new(position.top_right, 2, 18, border_width = 1)
 
 pr(int r, string k, string v, color bg) =>
     table.cell(pnl, 0, r, k, text_color = color.white, text_size = size.tiny,
@@ -743,40 +1015,44 @@ drawPanel() =>
          bgcolor = color.new(color.black, 10), text_size = size.small)
     table.cell(pnl, 1, 0, signalTxt, text_color = color.white,
          bgcolor = color.new(signalCol, 25), text_size = size.small)
-    pr(1, "Score", str.tostring(sc) + " / 100   (L " + str.tostring(longScore) +
+    pr(1, "Stage", (rvStage == 0 ? "—  no reversal forming" :
+         rvStage == 1 ? "1/3 WATCH — do nothing" : "2/3 CONFIRM — wait for close") +
+         (rvStage != 0 ? "  ·  " + rvType : ""),
+         color.new(rvStage == 2 ? #FFEA00 : rvStage == 1 ? cSweep : cNeut, 60))
+    pr(2, "Score", str.tostring(sc) + " / 100   (L " + str.tostring(longScore) +
          " · S " + str.tostring(shortScore) + ")", none)
-    pr(2, "Waiting on", blockTxt, color.new(sigLong or sigShort ? cBull : color.orange, 55))
-    pr(3, "1D macro", biasTxt(macroBias),
+    pr(3, "Waiting on", blockTxt, color.new(sigLong or sigShort ? cBull : color.orange, 55))
+    pr(4, "1D macro", biasTxt(macroBias),
          color.new(macroBias == 1 ? cBull : macroBias == -1 ? cBear : cNeut, 60))
-    pr(4, "1H direction", biasTxt(dirBias),
+    pr(5, "1H direction", biasTxt(dirBias),
          color.new(dirBias == 1 ? cBull : dirBias == -1 ? cBear : cNeut, 60))
-    pr(5, tfSetup + "M setup", biasTxt(setupBias) + "  ·  " + structTxt, none)
-    pr(6, "Regime", regime + "  (BBW " + str.tostring(bbwRank, "#") + "%)",
+    pr(6, tfSetup + "M setup", biasTxt(setupBias) + "  ·  " + structTxt, none)
+    pr(7, "Regime", regime + "  (BBW " + str.tostring(bbwRank, "#") + "%)",
          color.new(regime == "DEAD" or regime == "SQUEEZE" ? cBear : cNeut, 60))
-    pr(7, "Setup", (longSetup != "" ? "L: " + longSetup + " " : "") +
+    pr(8, "Setup", (longSetup != "" ? "L: " + longSetup + " " : "") +
          (shortSetup != "" ? "S: " + shortSetup : "") +
          (longSetup == "" and shortSetup == "" ? "none" : ""), none)
-    pr(8, "Trigger", trigTxt, none)
-    pr(9, "Momentum", "RSI " + str.tostring(rsi, "#.#") +
+    pr(9, "Trigger", trigTxt, none)
+    pr(10, "Momentum", "RSI " + str.tostring(rsi, "#.#") +
          (rsi >= rsiChase ? "  ⚠ too high to buy" :
          rsi <= 100.0 - rsiChase ? "  ⚠ too low to sell" : ""), none)
-    pr(10, "Volume", not volKnown ? "n/a" : volOk ? "confirmed" : "below average", none)
-    pr(11, "Volatility", "ATR " + str.tostring(atrPips, "#.#") + " pips  ·  ext " +
+    pr(11, "Volume", not volKnown ? "n/a" : volOk ? "confirmed" : "below average", none)
+    pr(12, "Volatility", "ATR " + str.tostring(atrPips, "#.#") + " pips  ·  ext " +
          str.tostring(extATR, "#.##") + " ATR", none)
-    pr(12, "Stop / target", str.tostring(rk / pipSize, "#.#") + " pips  →  TP1 " +
+    pr(13, "Stop / target", str.tostring(rk / pipSize, "#.#") + " pips  →  TP1 " +
          str.tostring(rk * rr1 / pipSize, "#.#") + " pips", none)
-    pr(13, "Size ($" + str.tostring(acctSize, "#") + " @ " +
+    pr(14, "Size ($" + str.tostring(acctSize, "#") + " @ " +
          str.tostring(riskPct, "#.#") + "%)",
          na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot  ·  $" +
          str.tostring(cash, "#.##") + (tooBig ? "  ⚠ TOO BIG" : ""),
          tooBig ? color.new(cBear, 35) : none)
-    pr(14, "Max stop", na(maxStopPips) ? "n/a" :
+    pr(15, "Max stop", na(maxStopPips) ? "n/a" :
          str.tostring(maxStopPips, "#.#") + " pips at " + str.tostring(minLot) + " lot", none)
     // Verify this row against your broker before trusting any size on screen.
-    pr(15, "Instrument", instName + "  ·  pip " + str.tostring(pipSize) + "  ·  $" +
+    pr(16, "Instrument", instName + "  ·  pip " + str.tostring(pipSize) + "  ·  $" +
          str.tostring(pipSize * contractSize * minLot, "#.###") + "/pip at " +
          str.tostring(minLot) + " lot", none)
-    pr(16, "Trade", tradeState, none)
+    pr(17, "Trade", tradeState, none)
 
 if barstate.islast and showPanel
     drawPanel()
