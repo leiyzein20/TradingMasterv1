@@ -194,3 +194,88 @@ duplicated prose and configuration nobody needs to touch.
 One follow-on bug from this pass, caught before shipping: moving `confluenceText`
 introduced the `chk()` helper *after* `scalpReasons()`, which also uses it —
 a forward reference. `chk()` now sits above both.
+
+---
+
+## 10. CE10243 — "your script has 2 declaration statements"
+
+Not a defect in any file. Every `.pine` here contains exactly one declaration:
+
+| File | Line | Declaration |
+|---|---|---|
+| `scalper_pro.pine` | 42 | `indicator("Scalper Pro", "ScalpPro", …)` |
+| `scalper_pro_strategy.pine` | 36 | `strategy("Scalper Pro Strategy", "ScalpStr", …)` |
+| `candlestick_master_pro.pine` | 32 | `indicator("Candlestick Master Pro", "CandlePro", …)` |
+| `candlestick_master_oscillators.pine` | 22 | `indicator("Candle Master Oscillators", "CM Osc", …)` |
+
+The error means two of them were pasted into one Pine Editor tab. Pine allows
+one declaration per *script*, and there is no way to merge them. Each needs
+Pine Editor → **Open** → **New indicator**.
+
+Quick check before compiling: `Ctrl+F` for `//@version=6`. Two matches means
+two scripts in the tab.
+
+The audit script now counts declarations, so a file that genuinely had two
+would be caught here rather than in the editor.
+
+---
+
+## 11. Rebuild around independent confirmation layers
+
+The brief that drove this: *"use independent layers of confirmation and reject
+trades when they disagree."* The previous design could not do the second half —
+everything fed one additive score, so a setup with structure and liquidity
+pointing opposite ways produced a middling number instead of a refusal.
+
+### What changed
+
+| Area | Before | After |
+|---|---|---|
+| Confirmation | one additive score | nine layers voting `-1/0/+1` independently, then a conflict check *before* the score is consulted |
+| Conflict | averaged away | `maxConflict` decisive layers against ⇒ ⚫ NO TRADE, with the disagreeing layers named on the panel |
+| Correlated inputs | RSI scored separately from everything | RSI + MACD + Bollinger share **one vote and one 10-point bucket** |
+| HTF | 1D + 1H | 1D + 4H + 1H → one reading plus a "strong" flag (all three agree) |
+| Intraday | 5M | 15M + 5M |
+| Wyckoff | none | spring / upthrust / test / SOS / SOW / absorption, with four guardrails |
+| Supply/demand | none | displacement-origin zones, fresh vs tested, invalidated on a close through |
+| Continuation | a plain EMA-band pullback | requires a real displacement leg, a 15–66% retrace, weak counter-pressure and a higher low |
+| Targets | `risk × R` | the nearest real levels above/below; R:R is then whatever the geometry gives, and a trade below `minRR` is rejected rather than re-engineered |
+| Output | BUY / SELL / stage text | exactly one of 🟢 BUY · 🔴 SELL · 🟡 WAIT · ⚫ NO TRADE |
+| Thresholds | 70 / 85 | 85 A+ · 75 tradable · 65 watch · below 65 no trade |
+| News | not addressed | panel always reports `NEWS STATUS: UNVERIFIED`; optional user-set blackout window |
+
+### Two bugs found by tracing the new maths before shipping
+
+**The conflict rule would have re-created the CONFIRM deadlock.** `l2Bull`
+initially read `structDir == 1 or (hh and hl) or chochUp`. A staged reversal
+often shifts structure by breaking a *micro* lower high (`hi5`) rather than the
+last major swing, so `bosUp` never fires and `structDir` keeps reading the old
+trend. The structure layer would then vote **against** the very reversal it had
+just confirmed, which — together with HTF also voting against — hits
+`maxConflict = 2` and cancels the trade. Every counter-trend reversal would
+have been silently blocked again, by a new mechanism.
+
+Fixed by letting the staged MSS override `structDir`: newest structural fact
+wins.
+
+```pine
+rvShift = rvStage == 2 and not na(rvMssBar)
+l2Bull = rvShift ? rvDir == 1 : (structDir == 1 or (hh and hl) or chochUp)
+```
+
+**`atHtfL` was a free 12 points in any downtrend.** It was written as
+`low <= pdl + tol * 2` — "price is below yesterday's low" — which is true on
+*every bar* of a day that opened under the previous low. The reversal scoring
+bucket would have handed out 12/15 for "at a higher-timeframe location" all
+session. Changed to a proximity test, `math.abs(low - pdl) <= tol * 3`, which
+is what "price reached the level" actually means; a sweep dips through and
+comes straight back, so the distance stays small either way.
+
+### Size
+
+1,136 → 1,833 lines, estimated 46k → 73k compiler tokens. The limit is 100,256,
+so there is roughly 27% headroom left.
+
+The static audit (`declaration count, delimiter balance, continuation indent,
+ta.* in ternary branches, forward references including inside function bodies,
+function/variable collisions, token estimate`) runs clean.

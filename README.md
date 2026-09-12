@@ -149,14 +149,30 @@ substantial risk of loss — do your own research and manage your own risk.
 
 ---
 
-## Two systems in this repo
+## Four scripts in this repo
+
+> **Each one needs its own Pine Editor tab.** Pine allows exactly one
+> `indicator()` / `strategy()` / `library()` per script. Pasting two of these
+> into the same tab produces `CE10243: your script has 2`. Pine Editor →
+> **Open** → **New indicator** for each.
 
 | Script | For | Timeframes |
 |---|---|---|
-| **`scalper_pro.pine`** | Focused 1m–5m scalping: HTF bias → liquidity sweep / pullback / break-retest → execution trigger. Position sizing built in. | 1m–15m chart, 1H + 1D bias |
-| `scalper_pro_strategy.pine` | Backtesting the above — expectancy, profit factor, drawdown | same |
-| `candlestick_master_oscillators.pine` | RSI / MACD / Stochastic in their own pane | any |
+| **`scalper_pro.pine`** | Focused 1m–5m scalping. Nine independent confirmation layers that can **cancel each other**; staged reversals, continuation, break-retest, pullback; Wyckoff and supply/demand; position sizing built in | 1m–15m chart, 1D + 4H + 1H bias |
+| `scalper_pro_strategy.pine` | Backtesting — expectancy, profit factor, drawdown. **Note:** still running the three original setups; it does not yet contain the staged reversal or the layer engine | same |
+| `candlestick_master_oscillators.pine` | RSI / MACD / Stochastic as visible curves in their own pane | any |
 | `candlestick_master_pro.pine` | 45 candlestick patterns + confluence. A different tool for higher timeframes | H1–D1 |
+
+### What `scalper_pro.pine` outputs
+
+Exactly one of 🟢 **BUY** · 🔴 **SELL** · 🟡 **WAIT** · ⚫ **NO TRADE**, every
+bar. WAIT means something is forming. NO TRADE means the conditions are wrong
+and waiting will not fix them — including when the decisive layers disagree
+with each other, which cancels the trade no matter how high the score is.
+
+Score bands: 85+ A+ · 75–84 tradable · 65–74 watch only · below 65 no trade.
+The score is confluence quality. It is **not** a win rate, and no win rate is
+claimed anywhere.
 
 **Start here:** [`STRATEGY.md`](STRATEGY.md) — why this strategy, what each
 indicator is for, exact entry/exit rules, the $60 risk framework, how repainting
