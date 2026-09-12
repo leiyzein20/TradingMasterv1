@@ -604,8 +604,8 @@ nearLo = low <= rangeLo + tolW
 nearHi = high >= rangeHi - tolW
 // Distinct approaches, not bars. Ten consecutive bars parked on the low are one
 // reaction, not ten, so only the entry into the zone is counted.
-touchLoN = ta.sum(nearLo and not nearLo[1] ? 1 : 0, wyLook)
-touchHiN = ta.sum(nearHi and not nearHi[1] ? 1 : 0, wyLook)
+touchLoN = math.sum(nearLo and not nearLo[1] ? 1 : 0, wyLook)
+touchHiN = math.sum(nearHi and not nearHi[1] ? 1 : 0, wyLook)
 
 // Effort vs result: volume was spent and price did not travel, or the bar was
 // violently rejected. Either says the opposing side absorbed the aggression.

@@ -279,3 +279,53 @@ so there is roughly 27% headroom left.
 The static audit (`declaration count, delimiter balance, continuation indent,
 ta.* in ternary branches, forward references including inside function bodies,
 function/variable collisions, token estimate`) runs clean.
+
+---
+
+## 12. `ta.sum` does not exist
+
+```
+Could not find function or function reference 'ta.sum'
+```
+
+My mistake, and an easy one to make: it was `sum()` in Pine v4 and moved to
+`math.sum()` in v5. `ta.sum` looks entirely plausible next to `ta.cum`,
+`ta.stdev` and `ta.variance` — but there is no such member.
+
+Used in two places in the Wyckoff touch counter:
+
+```pine
+touchLoN = math.sum(nearLo and not nearLo[1] ? 1 : 0, wyLook)
+touchHiN = math.sum(nearHi and not nearHi[1] ? 1 : 0, wyLook)
+```
+
+### The real fix: the audit never checked that built-ins exist
+
+Structure, scope and token budget were all being checked. Whether a function
+name was *real* was not — so a typo in a namespace sailed through everything
+and only surfaced on paste. `tools/pine_audit.py` now validates every
+`ta.` `math.` `str.` `box.` `line.` `label.` `table.` `request.` member
+against the v6 reference.
+
+Two false positives in the checker itself had to be fixed first, and both were
+instructive:
+
+- **Style constants were missing from the lists.** `label.style_label_up`,
+  `line.style_dashed` and friends are members too, not just functions.
+- **Indented named arguments were being read as declarations.** The
+  declaration regex allowed leading whitespace, so a continuation line like
+  `extend = boundBosLines ? extend.none : extend.right` registered `extend` as
+  a user variable — and then flagged `extend.none` on the same line as a
+  forward reference to it. A declaration must start at column 0; anything
+  indented inside an open call is a parameter name.
+
+All four scripts now pass:
+
+| Script | Lines | Est. tokens |
+|---|---|---|
+| `candlestick_master_oscillators.pine` | 143 | 7,241 |
+| `scalper_pro_strategy.pine` | 407 | 17,047 |
+| `scalper_pro.pine` | 1,836 | 73,136 |
+| `candlestick_master_pro.pine` | 2,391 | 89,520 |
+
+Run it with `python3 tools/pine_audit.py <file>.pine`.
