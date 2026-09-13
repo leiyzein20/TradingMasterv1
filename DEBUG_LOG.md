@@ -443,3 +443,63 @@ Checks: declaration count · delimiter balance · continuation indent ·
 `ta.*` in ternary branches · forward references (including inside function
 bodies) · function/variable collisions · built-in names exist · top-level
 redeclaration · if/else branch return types · token budget.
+
+---
+
+## 15. Building `xau_5m_scalper.pine` — what the audit caught
+
+Written from a new brief, checked before delivery rather than after. Three
+classes of problem surfaced.
+
+### Two checks added because nothing covered them
+
+**Check 11 — oversized scopes (CE10205 / CE10295).** Both are soft limits the
+compiler only reports on paste, and both have hit this repo before, but nothing
+measured them. The audit now reports top-level statement count and longest `if`
+body on every run:
+
+| Script | Top-level stmts | Longest if body |
+|---|---|---|
+| `candlestick_master_pro.pine` | 647 | 62 |
+| `xau_5m_scalper.pine` | 692 | 26 |
+| `xau_scalper.pine` | 627 | 28 |
+| `scalper_pro.pine` | 603 | 27 |
+
+**`array` and `map` namespaces** added to the built-in name checker, since this
+was the first script to use `map.*` for the volume profile.
+
+### A multi-line ternary scan
+
+The `ta.*`-in-ternary check only ever looked at single lines, and this file is
+full of multi-line ternaries — so a stateful call could have sat on a
+continuation line and gone unseen. Ran a one-off scan that joins continuation
+lines into logical lines first. Clean, including `math.sum`, which is stateful
+the same way.
+
+### Thirteen computed-then-unused values
+
+The dead-code sweep found thirteen. Every one was a brief requirement that got
+computed and then never wired in — which is worse than unused code, because the
+feature looks present in the source and does nothing:
+
+| Unused | What it should have been doing |
+|---|---|
+| `h1Atr` | 1H displacement context (§3) |
+| `m15Rsi` | tie-break on a neutral 15M EMA read |
+| `biasD` | 1D broad context (§1) |
+| `belowValue` | value-area position |
+| `wyObjUp` / `wyObjDn` | Law of Cause and Effect projection (§13) |
+| `bbRejUp` / `bbRejDn` | band rejection in the price-action bucket (§12) |
+| `candleTxt` | the dashboard's candle read (§36) |
+| `fibConfluent` | Fibonacci confluence scoring (§14) |
+| `regRanging` | regime-dependent behaviour (§16) |
+| `rr2L` / `rr2S` | the second ratio on the dashboard (§21) |
+
+All thirteen were wired in rather than deleted. The one worth noting is
+`regRanging`: §16 says the strategy must behave differently by regime, and
+without it every reversal faced the same bar everywhere. Now a mature range —
+where sweep reversals belong — uses the normal requirement, and fading a trend
+costs an extra sequence step.
+
+A dead-code sweep is not a style check. On this file it was the most productive
+review step of the build.

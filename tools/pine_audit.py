@@ -176,12 +176,19 @@ NS = {
  cell_set_text_font_family cell_set_text_halign cell_set_text_size cell_set_text_valign
  cell_set_tooltip cell_set_width clear delete merge_cells set_bgcolor set_border_color
  set_border_width set_frame_color set_frame_width set_position all""",
+ "array": """new new_float new_int new_bool new_string new_color new_line new_label
+ new_box new_table new_type abs avg binary_search binary_search_leftmost
+ binary_search_rightmost clear concat copy covariance every fill first from get
+ includes indexof insert join last lastindexof max median min mode percentile_linear_interpolation
+ percentile_nearest_rank percentrank pop push range remove reverse set shift size
+ slice some sort sort_indices standardize stdev sum unshift variance""",
+ "map": """new put get contains keys values remove clear size put_all copy""",
  "request": """security security_lower_tf currency_rate dividends earnings economic
  financial quandl seed splits""",
 }
 NS = {k: set(v.split()) for k, v in NS.items()}
 for i, l in enumerate(code):
-    for ns, member in re.findall(r"\b(ta|math|str|box|line|label|table|request)\.(\w+)", l):
+    for ns, member in re.findall(r"\b(ta|math|str|box|line|label|table|request|array|map)\.(\w+)", l):
         if member not in NS[ns]:
             problems.append(("NO-SUCH-FN", f"line {i+1}: '{ns}.{member}' is not a "
                                            f"Pine v6 built-in"))
@@ -270,6 +277,40 @@ for i, l in enumerate(code):
                                     f"different types — line {ln1} is {k1}, "
                                     f"line {ln2} is {k2}"))
 
+# ---------- 11. oversized if bodies and main scope ----------
+# CE10205 "the if statement is too long" and CE10295 "the main body of the
+# script is too long". Both are soft limits the compiler only reports once you
+# paste, so track the two numbers that drive them.
+worst_if = 0
+worst_line = 0
+for i, l in enumerate(code):
+    m = re.match(r"^(\s*)if\s+\S", l)
+    if not m:
+        continue
+    base = len(m.group(1))
+    n = 0
+    j = i + 1
+    while j < len(code):
+        t = code[j]
+        if t.strip():
+            ind = len(lines[j]) - len(lines[j].lstrip())
+            if ind <= base:
+                break
+            n += 1
+        j += 1
+    if n > worst_if:
+        worst_if, worst_line = n, i + 1
+if worst_if > 300:
+    problems.append(("CE10205", f"line {worst_line}: if body is {worst_if} lines — "
+                                f"wrap part of it in a function"))
+
+top_level = sum(1 for l in code
+                if l.strip() and not l.startswith((" ", "\t"))
+                and not l.lstrip().startswith("//"))
+if top_level > 900:
+    problems.append(("CE10295", f"{top_level} top-level statements — move work "
+                                f"into functions"))
+
 # ---------- 7. token estimate ----------
 raw = sum(len(re.findall(r"[A-Za-z_]\w*|\d+\.?\d*|[^\s\w]", l)) for l in code)
 est = int(raw * 5.18)
@@ -278,6 +319,7 @@ print(f"raw tokens       {raw}")
 print(f"compiler est.    {est:,}  (limit 100,256)"
       + ("  ⚠ OVER" if est > 100256 else "  ok"))
 print(f"declarations     {len(decls)}")
+print(f"top-level stmts  {top_level}  ·  longest if body {worst_if} lines")
 print()
 
 if problems:

@@ -149,7 +149,7 @@ substantial risk of loss — do your own research and manage your own risk.
 
 ---
 
-## Five scripts in this repo
+## Six scripts in this repo
 
 > **Each one needs its own Pine Editor tab.** Pine allows exactly one
 > `indicator()` / `strategy()` / `library()` per script. Pasting two of these
@@ -158,11 +158,21 @@ substantial risk of loss — do your own research and manage your own risk.
 
 | Script | For | Timeframes |
 |---|---|---|
+| **`xau_5m_scalper.pine`** | XAUUSD 5M. Ten-step reversal and continuation sequences, Wyckoff events + phases + three laws, estimated delta from lower-timeframe volume, session volume profile, full trade-management state machine (TP / cancel / break-even). Built from `anotherone.txt` | 5M chart, 15M/1H/4H/1D context |
 | **`xau_scalper.pine`** | XAUUSD only. Layers that **confirm each other in a chain** rather than vote; Wyckoff events + phases + the three laws, ranked S/R, liquidity sweeps, a setup state machine with explicit cancellation. Built from `Read_Instruction_Master_Scalping.txt` | 1M / 3M chart, 15M context |
 | **`scalper_pro.pine`** | Focused 1m–5m scalping. Nine independent confirmation layers that can **cancel each other**; staged reversals, continuation, break-retest, pullback; Wyckoff and supply/demand; position sizing built in | 1m–15m chart, 1D + 4H + 1H bias |
 | `scalper_pro_strategy.pine` | Backtesting — expectancy, profit factor, drawdown. **Note:** still running the three original setups; it does not yet contain the staged reversal or the layer engine | same |
 | `candlestick_master_oscillators.pine` | RSI / MACD / Stochastic as visible curves in their own pane | any |
 | `candlestick_master_pro.pine` | 45 candlestick patterns + confluence. A different tool for higher timeframes | H1–D1 |
+
+The three scalping engines are **separate systems that disagree with each
+other on purpose**, each built from a different brief. `xau_5m_scalper.pine`
+gates a ten-step sequence through a state machine; `xau_scalper.pine` walks a
+confirmation chain where any structural layer can end a thesis;
+`scalper_pro.pine` uses nine layers voting independently with a conflict veto.
+No trading logic is shared. Docs: [`XAU5M.md`](XAU5M.md),
+[`ARCHITECTURE.md`](ARCHITECTURE.md) + [`MANUAL.md`](MANUAL.md), and
+[`STRATEGY.md`](STRATEGY.md) respectively.
 
 `xau_scalper.pine` and `scalper_pro.pine` are **separate systems that disagree
 with each other on purpose.** Scalper Pro uses nine layers voting
