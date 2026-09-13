@@ -186,6 +186,27 @@ for i, l in enumerate(code):
             problems.append(("NO-SUCH-FN", f"line {i+1}: '{ns}.{member}' is not a "
                                            f"Pine v6 built-in"))
 
+# ---------- 9. a name declared twice at top level ----------
+# Pine has no shadowing at global scope: a second `x = ...` is a redeclaration
+# error, and it is easy to hit when a tuple destructuring reuses a short name
+# that the palette or the inputs already took (cE20 as both a colour and an
+# EMA value, for instance). Counts tuple targets as declarations too.
+seen = {}
+for i, l in enumerate(code):
+    names = []
+    m = re.match(r"^(?:var(?:ip)?\s+)?(?:(?:int|float|bool|string|color|line|label|box|table|array<[^>]+>)\s+)?(\w+)\s*=(?!=)", l)
+    if m:
+        names.append(m.group(1))
+    m = re.match(r"^\[([^\]]+)\]\s*=", l)
+    if m:
+        names += [n.strip().split()[-1] for n in m.group(1).split(",") if n.strip()]
+    for n in names:
+        if n in seen:
+            problems.append(("REDECLARED", f"line {i+1}: '{n}' was already "
+                                           f"declared on line {seen[n]+1}"))
+        else:
+            seen[n] = i
+
 # ---------- 7. token estimate ----------
 raw = sum(len(re.findall(r"[A-Za-z_]\w*|\d+\.?\d*|[^\s\w]", l)) for l in code)
 est = int(raw * 5.18)

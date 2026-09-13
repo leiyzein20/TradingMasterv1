@@ -329,3 +329,45 @@ All four scripts now pass:
 | `candlestick_master_pro.pine` | 2,391 | 89,520 |
 
 Run it with `python3 tools/pine_audit.py <file>.pine`.
+
+---
+
+## 13. `cE20` / `cE50` declared twice in xau_scalper.pine
+
+The palette defines the EMA plot colours:
+
+```pine
+cE20 = #FF00E5      // line 192
+cE50 = #00B0FF
+```
+
+and the 15M context read then reused those exact names as its tuple targets:
+
+```pine
+[cClose, cE20, cE50, cHi, cLo, cRsi] = request.security(...)   // line 293
+```
+
+Pine has no shadowing at global scope, so the second `cE20` is a
+redeclaration — and it redeclares a `color` as a `float`, which is why the
+error clusters around those two lines rather than pointing at the palette.
+
+Renamed the context values to `ctxC` / `ctxEma20` / `ctxEma50` / `ctxRawHi` /
+`ctxRawLo` / `ctxRsi`. The colours keep their names because they are what the
+plots and the legend reference.
+
+### The audit had no redeclaration check
+
+It checked function-vs-variable collisions but not variable-vs-variable, so a
+short name reused by a tuple destructuring walked straight past it. Added as
+check 9: any name declared at column 0 twice, counting tuple targets as
+declarations. Verified against a minimal reproduction of this exact bug.
+
+All five scripts now pass all nine checks:
+
+| Script | Lines | Est. tokens |
+|---|---|---|
+| `candlestick_master_oscillators.pine` | 143 | 7,241 |
+| `scalper_pro_strategy.pine` | 407 | 17,047 |
+| `scalper_pro.pine` | 1,836 | 73,136 |
+| `xau_scalper.pine` | 1,839 | 74,524 |
+| `candlestick_master_pro.pine` | 2,391 | 89,520 |

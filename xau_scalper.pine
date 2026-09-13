@@ -290,7 +290,10 @@ ldnLo := ll2
 // expr[1] + lookahead_on returns the last CLOSED 15M bar. Identical live and
 // historically. This is the non-repainting form, not a violation of it.
 
-[cClose, cE20, cE50, cHi, cLo, cRsi] = request.security(syminfo.tickerid, tfCtx,
+// Named ctx* rather than c* — cE20 and cE50 are already the EMA plot COLOURS
+// in the palette above, and reusing them here redeclared a color as a float.
+[ctxC, ctxEma20, ctxEma50, ctxRawHi, ctxRawLo, ctxRsi] =
+     request.security(syminfo.tickerid, tfCtx,
      [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1],
      ta.highest(high, 20)[1], ta.lowest(low, 20)[1], ta.rsi(close, 14)[1]],
      lookahead = barmerge.lookahead_on)
@@ -307,16 +310,18 @@ setHigher = timeframe.in_seconds() < timeframe.in_seconds(tfSet)
 dayHigher = timeframe.in_seconds() < timeframe.in_seconds("1D")
 pdh = dayHigher ? dHi : na
 pdl = dayHigher ? dLo : na
-ctxHi = ctxHigher ? cHi : na
-ctxLo = ctxHigher ? cLo : na
+ctxHi = ctxHigher ? ctxRawHi : na
+ctxLo = ctxHigher ? ctxRawLo : na
 
 // 15M bias. -1 bearish · 0 neutral · +1 bullish.
-ctxBias = na(cClose) or na(cE20) or na(cE50) ? 0 :
-     cClose > cE20 and cE20 > cE50 ? 1 :
-     cClose < cE20 and cE20 < cE50 ? -1 :
-     cClose > cE20 and cRsi > 50 ? 1 : cClose < cE20 and cRsi < 50 ? -1 : 0
-ctxStrong = not na(cClose) and not na(cE50) and
-     (ctxBias == 1 ? cClose > cE50 and cE20 > cE50 : ctxBias == -1 ? cClose < cE50 and cE20 < cE50 : false)
+ctxBias = na(ctxC) or na(ctxEma20) or na(ctxEma50) ? 0 :
+     ctxC > ctxEma20 and ctxEma20 > ctxEma50 ? 1 :
+     ctxC < ctxEma20 and ctxEma20 < ctxEma50 ? -1 :
+     ctxC > ctxEma20 and ctxRsi > 50 ? 1 :
+     ctxC < ctxEma20 and ctxRsi < 50 ? -1 : 0
+ctxStrong = not na(ctxC) and not na(ctxEma50) and
+     (ctxBias == 1 ? ctxC > ctxEma50 and ctxEma20 > ctxEma50 :
+      ctxBias == -1 ? ctxC < ctxEma50 and ctxEma20 < ctxEma50 : false)
 setBias = na(sClose) or na(sE20) ? 0 : sClose > sE20 ? 1 : sClose < sE20 ? -1 : 0
 biasTxt(int b) =>
     b == 1 ? "BULLISH" : b == -1 ? "BEARISH" : "NEUTRAL"
