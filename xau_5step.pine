@@ -1,0 +1,1440 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+// XAU 5-STEP — XAUUSD 5M, built on the five-step framework as its CORE
+//
+// The five steps are a PIPELINE, not a checklist. They must happen in order and
+// none may be skipped, which is the whole point of this engine:
+//
+//   1 TREND DIRECTION      1H major context · 15M structure · 5M execution
+//   2 LIQUIDITY + POI      mark the zones and the likely stop clusters FIRST
+//   3 MITIGATION           price must actually interact with the chosen POI
+//   4 SWEEP + ENTRY MODEL  sweep → failure → MSS → displacement → candle close
+//   5 TARGETS + STOP       beyond the protected low/high, targets on real levels
+//
+// This is why the state machine is ordered rather than a score:
+//   IDLE → BIAS → POI IDENTIFIED → WAITING MITIGATION → MITIGATED →
+//   WAITING SWEEP → LIQUIDITY SWEPT → WAITING MSS → WAITING CONFIRMATION →
+//   CONFIRMED → ACTIVE → TP DEVELOPING → TP CONFIRMED
+//   ACTIVE → INVALIDATED → CANCELLED → RESET
+// A state can only be entered from the one before it. A sweep with no mitigated
+// POI is ignored. An MSS with no sweep is ignored. A high score cannot skip a
+// step, and no confluence total can override structural invalidation.
+//
+// PROTECTED LOW / HIGH
+//   The sweep extreme is only a CANDIDATE. It becomes the protected level —
+//   and therefore the stop — after the market has actually rejected the
+//   liquidity area AND structure has shifted. The first wick is not protection.
+//
+// LANGUAGE
+//   "likely liquidity" and "potential stop cluster", never "the stops are at".
+//   Pine sees price and volume. It does not see anyone's orders.
+//
+// NON-REPAINTING
+//   Higher-timeframe reads use expr[1] with lookahead_off — the [1] is what
+//   makes it safe, since lookahead_off alone still lets the forming HTF bar
+//   update intrabar. Every state transition requires barstate.isconfirmed, and
+//   the confirmation candle must be a LATER bar than the MSS that preceded it.
+//
+// This framework exists to improve selectivity. It does not claim profitability
+// and no win rate is claimed anywhere. Backtest and forward-test on XAUUSD 5M
+// before risking money.
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("XAU 5-Step", "XAU5Step", overlay = true,
+     max_labels_count = 300, max_lines_count = 250, max_boxes_count = 200)
+
+// ─────────────────────────── USER TYPE ──────────────────────────────────────
+// A point of interest is an object with a life, not a price. It has a quality
+// grade, it gets mitigated, and it can fail — all of which the framework needs
+// to track per zone rather than globally.
+type Poi
+    float top
+    float bot
+    int   bar
+    int   dir          // +1 demand / support · -1 supply / resistance
+    string kind
+    int   quality      // overlapping confluences, 1-6
+    int   state        // 0 fresh · 1 touched · 2 mitigated · 3 failed
+    float deepest      // furthest penetration so far
+    int   touches
+
+// ──────────────────────────── INPUTS ────────────────────────────────────────
+
+gTF = "01  Timeframes"
+tfMajor = input.timeframe("60", "Major context (Step 1)", group = gTF)
+tfStruct = input.timeframe("15", "Intraday structure (Step 1)", group = gTF)
+warnTf = input.bool(true, "Warn when not on a 5m chart", group = gTF)
+
+gS1 = "02  Step 1 — trend"
+requireAlign = input.bool(true, "Require 1H and 15M to agree", group = gS1,
+     tooltip = "The brief's primary rule. When they disagree the correct output is WAIT, and turning this off is how you end up forcing trades.")
+pivIn = input.int(3, "Internal swing length", group = gS1, minval = 2, maxval = 10)
+pivEx = input.int(8, "External swing length", group = gS1, minval = 4, maxval = 30)
+
+gS2 = "03  Step 2 — POI & liquidity"
+poiMax = input.int(12, "Maximum live POIs", group = gS2, minval = 4, maxval = 30)
+poiLife = input.int(180, "POI expires after (bars)", group = gS2, minval = 20, maxval = 600)
+zoneAtr = input.float(0.4, "Zone half-width (x ATR)", group = gS2,
+     minval = 0.1, step = 0.05)
+minQuality = input.int(2, "Minimum POI quality to trade", group = gS2,
+     minval = 1, maxval = 6,
+     tooltip = "Quality counts how many independent things overlap the zone: HTF level, supply/demand, likely liquidity, Wyckoff boundary, Fibonacci, session level.")
+eqTol = input.float(0.2, "Equal high/low tolerance (x ATR)", group = gS2,
+     minval = 0.02, step = 0.01)
+liqLook = input.int(24, "Liquidity pool lookback", group = gS2, minval = 6, maxval = 150)
+
+gS3 = "04  Step 3 — mitigation"
+mitigMax = input.int(40, "Abandon POI if unmitigated for (bars)", group = gS3,
+     minval = 5, maxval = 300)
+acceptBars = input.int(3, "Closes inside the zone that mean ACCEPTANCE", group = gS3,
+     minval = 2, maxval = 10,
+     tooltip = "Price sitting inside a zone rather than rejecting from it means the zone is being accepted, not defended. That kills the POI.")
+
+gS4 = "05  Step 4 — sweep & entry"
+sweepLife = input.int(12, "Sweep stays relevant for (bars)", group = gS4,
+     minval = 2, maxval = 60)
+mssWin = input.int(10, "MSS must occur within (bars of the sweep)", group = gS4,
+     minval = 2, maxval = 40)
+confirmWin = input.int(5, "Confirmation candle within (bars of the MSS)", group = gS4,
+     minval = 1, maxval = 20)
+needDisplacement = input.bool(true, "Require displacement before entry", group = gS4)
+needVolume = input.bool(false, "Require volume expansion", group = gS4,
+     tooltip = "Off by default: XAUUSD volume is tick volume on most feeds, so making it mandatory rejects good setups for a bad reason.")
+cooldown = input.int(10, "Bars between signals", group = gS4, minval = 0, maxval = 100)
+
+gS5 = "06  Step 5 — targets & stop"
+slBufAtr = input.float(0.35, "Stop buffer beyond protected level (x ATR)",
+     group = gS5, minval = 0.05, step = 0.05)
+slFloorAtr = input.float(0.8, "Stop floor (x ATR)", group = gS5, minval = 0.2, step = 0.1)
+minRR = input.float(1.5, "Minimum R:R to TP1", group = gS5, minval = 0.5, step = 0.1,
+     tooltip = "Below this the setup is rejected. The stop is never moved closer to manufacture a ratio.")
+maxHold = input.int(36, "Time stop (bars)", group = gS5, minval = 3, maxval = 300)
+beAfterTp1 = input.bool(true, "Suggest break-even after TP1", group = gS5)
+
+gRK = "07  Risk"
+acctSize = input.float(60.0, "Account size ($)", group = gRK, minval = 1, step = 10)
+riskPct = input.float(1.5, "Risk per trade (%)", group = gRK,
+     minval = 0.1, maxval = 5.0, step = 0.1)
+spreadPips = input.float(2.5, "Your typical spread (pips)", group = gRK,
+     minval = 0.0, step = 0.1,
+     tooltip = "XAUUSD is normally 2.0-3.5 pips, i.e. 20-35 cents. Every position size shown depends on this being right.")
+minLot = input.float(0.01, "Broker minimum lot", group = gRK, minval = 0.0001)
+minAtrPips = input.float(3.0, "Minimum ATR (pips) to trade", group = gRK,
+     minval = 0.1, step = 0.1)
+maxExtAtr = input.float(1.5, "Anti-chase: reject beyond (x ATR) from EMA20",
+     group = gRK, minval = 0.3, step = 0.1)
+
+gMO = "08  Secondary indicators"
+useWyckoff = input.bool(true, "Wyckoff context", group = gMO)
+useDelta = input.bool(true, "Estimated delta", group = gMO)
+useFib = input.bool(true, "Fibonacci confluence", group = gMO)
+rsiLen = input.int(14, "RSI length", group = gMO, minval = 2, maxval = 50)
+macdFast = input.int(12, "MACD fast", group = gMO, minval = 2)
+macdSlow = input.int(26, "MACD slow", group = gMO, minval = 3)
+macdSigL = input.int(9, "MACD signal", group = gMO, minval = 1)
+volMult = input.float(1.3, "Volume expansion multiple", group = gMO,
+     minval = 0.5, step = 0.1)
+ltfRes = input.timeframe("1", "Lower timeframe for estimated delta", group = gMO)
+minScore = input.int(80, "Minimum confluence to confirm", group = gMO,
+     minval = 40, maxval = 100,
+     tooltip = "The score ranks setups that already passed all five steps. It can never let one skip a step.")
+
+gSS = "09  Sessions"
+sessAsia = input.session("0000-0600", "Asian", group = gSS)
+sessLdn = input.session("0700-1000", "London", group = gSS)
+sessNy = input.session("1200-1500", "New York", group = gSS)
+sessTz = input.string("GMT", "Timezone", group = gSS,
+     options = ["GMT", "GMT-5", "GMT-4", "GMT+1", "GMT+2", "GMT+7", "GMT+8",
+     "America/New_York", "Europe/London", "Asia/Tokyo"])
+kzOnly = input.bool(true, "Signal in London / New York only", group = gSS)
+
+gVI = "10  Display"
+showDash = input.bool(true, "Dashboard", group = gVI)
+showPoi = input.bool(true, "POI zones", group = gVI)
+showLiq = input.bool(true, "Likely liquidity + sweeps", group = gVI)
+showSteps = input.bool(true, "Step progress labels", group = gVI)
+showSig = input.bool(true, "Entry / TP / cancel labels", group = gVI)
+showTradeLn = input.bool(true, "Entry / SL / TP lines", group = gVI)
+showStruct = input.bool(true, "BOS / MSS", group = gVI)
+showEmaLn = input.bool(true, "EMA 20 / 50 / 200", group = gVI)
+showLegend = input.bool(true, "Legend", group = gVI)
+
+colBull = #00E676
+colBear = #FF1744
+colNeut = #78909C
+colStep = #FFC400
+colDead = #455A64
+colE20 = #FF00E5
+colE50 = #00B0FF
+colE200 = #9E9E9E
+colDemand = #00C853
+colSupply = #D50000
+colLiqC = #FFAB00
+colWycC = #AB47BC
+colEntryC = #FFFFFF
+
+// ─────────────────────────── INSTRUMENT ─────────────────────────────────────
+// XAUUSD arithmetic, hard-coded: 1 lot = 100 oz, 1 pip = 0.10, $10/pip/lot.
+PIP = 0.10
+PIPVAL = PIP * 100.0
+isGold = str.contains(str.upper(syminfo.ticker), "XAU") or
+     str.contains(str.upper(syminfo.ticker), "GOLD")
+chartMin = timeframe.in_seconds() / 60.0
+on5m = chartMin >= 3 and chartMin <= 10
+
+// ───────────────────────── CORE SERIES ──────────────────────────────────────
+
+confirmed = barstate.isconfirmed
+body = math.abs(close - open)
+rng = high - low
+upWick = high - math.max(close, open)
+loWick = math.min(close, open) - low
+bodyPct = rng > 0 ? body / rng : 0.0
+barMid = (high + low) / 2.0
+closePos = rng > 0 ? (close - low) / rng : 0.5
+
+atr = ta.atr(14)
+atrAvg = ta.sma(atr, 20)
+atrPips = atr / PIP
+dead = atrPips < minAtrPips
+zoneW = atr * zoneAtr
+// Volatility direction, not just level: a stop sized in a contracting market
+// is about to be too wide, and one sized in an expanding market too tight.
+atrExpanding = not na(atrAvg) and atrAvg > 0 and atr > atrAvg * 1.1
+atrContracting = not na(atrAvg) and atrAvg > 0 and atr < atrAvg * 0.9
+atrTxt = str.tostring(atrPips, "#.#") + " pips" +
+     (dead ? " ⚠ too quiet" : atrExpanding ? " · expanding" :
+     atrContracting ? " · contracting" : " · steady")
+
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+slope20 = atr > 0 ? (ema20 - ema20[3]) / atr : 0.0
+
+rsi = ta.rsi(close, rsiLen)
+[macdLine, macdSigLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSigL)
+
+volSma = ta.sma(volume, 20)
+volKnown = not na(volume) and volume > 0 and not na(volSma) and volSma > 0
+volRel = volKnown ? volume / volSma : na
+volExp = volKnown and volRel >= volMult
+volDry = volKnown and volRel < 0.7
+
+extFromEma = atr > 0 ? math.abs(close - ema20) / atr : 0.0
+chasing = extFromEma > maxExtAtr
+
+// ───────────────────────────── SESSIONS ─────────────────────────────────────
+
+inAsia = not na(time(timeframe.period, sessAsia, sessTz))
+inLdn = not na(time(timeframe.period, sessLdn, sessTz))
+inNy = not na(time(timeframe.period, sessNy, sessTz))
+inKz = inLdn or inNy
+sessName = inLdn and inNy ? "LDN/NY OVERLAP" : inLdn ? "LONDON" : inNy ? "NEW YORK" :
+     inAsia ? "ASIAN" : "off-session"
+sessionOk = not kzOnly or not timeframe.isintraday or inKz
+
+trackHL(bool inSess, float hiIn, float loIn) =>
+    float h = hiIn
+    float l = loIn
+    if inSess and not inSess[1]
+        h := high
+        l := low
+    else if inSess
+        h := math.max(nz(h, high), high)
+        l := math.min(nz(l, low), low)
+    [h, l]
+
+var float asiaHi = na
+var float asiaLo = na
+var float ldnHi = na
+var float ldnLo = na
+[aH, aL] = trackHL(inAsia, asiaHi, asiaLo)
+asiaHi := aH
+asiaLo := aL
+[lH, lL] = trackHL(inLdn, ldnHi, ldnLo)
+ldnHi := lH
+ldnLo := lL
+
+// ═══════════════ STEP 1 — TREND DIRECTION (1H · 15M · 5M) ═══════════════════
+// The framework's first gate. Nothing downstream runs until this produces a
+// direction, and when 1H and 15M disagree the correct answer is WAIT.
+
+[h1C, h1E20, h1E50, h1Hi, h1Lo] = request.security(syminfo.tickerid, tfMajor,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1],
+     ta.highest(high, 12)[1], ta.lowest(low, 12)[1]],
+     lookahead = barmerge.lookahead_off)
+
+[m15C, m15E20, m15E50, m15Hi, m15Lo] = request.security(syminfo.tickerid, tfStruct,
+     [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1],
+     ta.highest(high, 12)[1], ta.lowest(low, 12)[1]],
+     lookahead = barmerge.lookahead_off)
+
+[pdHi, pdLo] = request.security(syminfo.tickerid, "1D", [high[1], low[1]],
+     lookahead = barmerge.lookahead_off)
+
+above(string tf) =>
+    timeframe.in_seconds() < timeframe.in_seconds(tf)
+pdh = above("1D") ? pdHi : na
+pdl = above("1D") ? pdLo : na
+h1High = above(tfMajor) ? h1Hi : na
+h1Low = above(tfMajor) ? h1Lo : na
+m15High = above(tfStruct) ? m15Hi : na
+m15Low = above(tfStruct) ? m15Lo : na
+
+tfBias(float c, float e20, float e50) =>
+    na(c) or na(e20) or na(e50) ? 0 :
+     c > e20 and e20 > e50 ? 1 : c < e20 and e20 < e50 ? -1 :
+     c > e20 ? 1 : c < e20 ? -1 : 0
+
+bias1h = tfBias(h1C, h1E20, h1E50)
+bias15 = tfBias(m15C, m15E20, m15E50)
+biasTxt(int b) =>
+    b == 1 ? "BULLISH" : b == -1 ? "BEARISH" : "NEUTRAL"
+
+// ── 5M structure ────────────────────────────────────────────────────────────
+// External is the skeleton, internal is the detail. A reversal breaks internal
+// structure long before external structure turns, and conflating the two makes
+// every 5m wiggle look like a trend change.
+pvHiIn = ta.pivothigh(high, pivIn, pivIn)
+pvLoIn = ta.pivotlow(low, pivIn, pivIn)
+pvHiEx = ta.pivothigh(high, pivEx, pivEx)
+pvLoEx = ta.pivotlow(low, pivEx, pivEx)
+
+var float inHi = na
+var float inLo = na
+var bool inHiLive = false
+var bool inLoLive = false
+var float exHi = na
+var float exLo = na
+var float exHiPrev = na
+var float exLoPrev = na
+var bool exHiLive = false
+var bool exLoLive = false
+var int exHiBar = na
+var int exLoBar = na
+var int trendDir = 0
+
+if not na(pvHiIn)
+    inHi := pvHiIn
+    inHiLive := true
+if not na(pvLoIn)
+    inLo := pvLoIn
+    inLoLive := true
+if not na(pvHiEx)
+    exHiPrev := exHi
+    exHi := pvHiEx
+    exHiBar := bar_index - pivEx
+    exHiLive := true
+if not na(pvLoEx)
+    exLoPrev := exLo
+    exLo := pvLoEx
+    exLoBar := bar_index - pivEx
+    exLoLive := true
+
+hh = not na(exHi) and not na(exHiPrev) and exHi > exHiPrev
+lh = not na(exHi) and not na(exHiPrev) and exHi < exHiPrev
+hl = not na(exLo) and not na(exLoPrev) and exLo > exLoPrev
+ll = not na(exLo) and not na(exLoPrev) and exLo < exLoPrev
+struct5 = hh and hl ? "HH + HL" : lh and ll ? "LH + LL" :
+     hh or hl ? "mixed bullish" : lh or ll ? "mixed bearish" : "forming"
+
+bosUp = exHiLive and not na(exHi) and close > exHi
+bosDn = exLoLive and not na(exLo) and close < exLo
+chochUp = bosUp and trendDir == -1
+chochDn = bosDn and trendDir == 1
+mssUp = inHiLive and not na(inHi) and close > inHi
+mssDn = inLoLive and not na(inLo) and close < inLo
+
+var float brokeHi = na
+var float brokeLo = na
+if bosUp
+    exHiLive := false
+    trendDir := 1
+    brokeHi := exHi
+if bosDn
+    exLoLive := false
+    trendDir := -1
+    brokeLo := exLo
+if mssUp
+    inHiLive := false
+if mssDn
+    inLoLive := false
+
+dispBull = close > open and body >= atr * 1.1 and bodyPct >= 0.5
+dispBear = close < open and body >= atr * 1.1 and bodyPct >= 0.5
+var int dispBullBar = na
+var int dispBearBar = na
+if confirmed and dispBull
+    dispBullBar := bar_index
+if confirmed and dispBear
+    dispBearBar := bar_index
+
+// Trend strength and exhaustion, both named by the brief.
+trendStrength = (trendDir == 1 and hh and hl) or (trendDir == -1 and lh and ll) ? 2 :
+     trendDir != 0 ? 1 : 0
+exhausted = (trendDir == 1 and lh) or (trendDir == -1 and hl) or
+     (math.abs(close - ema20) > atr * 2.0)
+
+var int lastFlipBar = na
+if confirmed and (chochUp or chochDn)
+    lastFlipBar := bar_index
+transition = not na(lastFlipBar) and bar_index - lastFlipBar <= 10
+
+// THE STEP 1 OUTPUT. Everything downstream reads this and nothing else.
+aligned = bias1h != 0 and bias1h == bias15
+conflicting = bias1h != 0 and bias15 != 0 and bias1h != bias15
+bias = aligned ? bias1h :
+     conflicting ? 0 :
+     bias1h != 0 and bias15 == 0 ? bias1h :
+     bias15 != 0 and bias1h == 0 ? bias15 : 0
+biasOk = not requireAlign or aligned
+
+regime = dead ? "LOW VOLATILITY" : transition ? "TRANSITION" :
+     conflicting ? "CONFLICTING TIMEFRAMES" :
+     aligned and trendStrength == 2 ? "TRENDING " + biasTxt(bias) :
+     aligned ? "WEAK " + biasTxt(bias) : "RANGE"
+
+step1Txt = biasTxt(bias1h) + " / " + biasTxt(bias15) +
+     (aligned ? "  ✓ aligned" : conflicting ? "  ✗ conflicting — WAIT" : "  · partial") +
+     (exhausted ? "  ⚠ exhaustion" : "")
+
+// ═════════════ SUPPORTING CONTEXT (feeds POI quality and Step 4) ════════════
+
+// Wyckoff trading-range boundaries. Used here mainly as POI confluence and as
+// context for the sweep, not as a standalone signal.
+wyLook = 48
+rHi = ta.highest(high, wyLook)[1]
+rLo = ta.lowest(low, wyLook)[1]
+rMid = (rHi + rLo) / 2.0
+rangeOk = useWyckoff and not na(rHi) and atr > 0 and
+     (rHi - rLo) <= atr * 7.0 and (rHi - rLo) >= atr * 1.5
+nearLoW = low <= rLo + zoneW
+nearHiW = high >= rHi - zoneW
+touchLoW = math.sum(nearLoW and not nearLoW[1] ? 1 : 0, wyLook)
+touchHiW = math.sum(nearHiW and not nearHiW[1] ? 1 : 0, wyLook)
+effortHigh = volKnown and volRel >= volMult
+resultPoor = rng > 0 and body <= rng * 0.4
+absorbLo = effortHigh and resultPoor and close >= barMid
+absorbHi = effortHigh and resultPoor and close <= barMid
+springRaw = rangeOk and touchLoW >= 2 and low < rLo and close > rLo and
+     (loWick >= body or absorbLo)
+utRaw = rangeOk and touchHiW >= 2 and high > rHi and close < rHi and
+     (upWick >= body or absorbHi)
+var int springBar = na
+var float springLow = na
+var int utBar = na
+var float utHigh = na
+if confirmed and springRaw
+    springBar := bar_index
+    springLow := low
+if confirmed and utRaw
+    utBar := bar_index
+    utHigh := high
+springLive = not na(springBar) and bar_index - springBar <= 18 and
+     (na(springLow) or low >= springLow)
+utLive = not na(utBar) and bar_index - utBar <= 18 and
+     (na(utHigh) or high <= utHigh)
+wyBull = useWyckoff and (springLive or (absorbLo and nearLoW and rangeOk))
+wyBear = useWyckoff and (utLive or (absorbHi and nearHiW and rangeOk))
+wyHalf = not rangeOk ? "" : close > rMid ? " · upper half" : " · lower half"
+wyTxt = springRaw ? "SPRING" + wyHalf : utRaw ? "UPTHRUST" + wyHalf :
+     springLive ? "spring (live)" + wyHalf : utLive ? "upthrust (live)" + wyHalf :
+     absorbLo ? "absorption low" : absorbHi ? "absorption high" :
+     rangeOk ? "range " + str.tostring(rLo, format.mintick) + "-" +
+     str.tostring(rHi, format.mintick) + wyHalf : "no valid range"
+
+// Fibonacci from the last confirmed external leg, used only as confluence.
+legOk = useFib and not na(exHi) and not na(exLo) and math.abs(exHi - exLo) >= atr * 2.5
+legUp = legOk and not na(exHiBar) and not na(exLoBar) and exHiBar > exLoBar
+fTop = legOk ? math.max(exHi, exLo) : na
+fBot = legOk ? math.min(exHi, exLo) : na
+fH = legOk ? fTop - fBot : na
+fib50 = legOk ? (fTop + fBot) / 2.0 : na
+fib618 = legOk ? (legUp ? fTop - fH * 0.618 : fBot + fH * 0.618) : na
+fib786 = legOk ? (legUp ? fTop - fH * 0.786 : fBot + fH * 0.786) : na
+nearFib(float px) =>
+    legOk and (math.abs(px - fib50) <= zoneW or math.abs(px - fib618) <= zoneW or
+     math.abs(px - fib786) <= zoneW)
+
+// ESTIMATED DELTA — inferred, never observed. Each lower-timeframe bar's volume
+// is signed by whether that intrabar closed up or down, then summed. It is not
+// bid/ask delta and cannot be: Pine has no tape.
+[ltfC, ltfO, ltfV] = request.security_lower_tf(syminfo.tickerid, ltfRes,
+     [close, open, volume])
+float estDelta = 0.0
+float ltfTotal = 0.0
+bool deltaFromLtf = false
+if useDelta and array.size(ltfV) > 0
+    for i = 0 to array.size(ltfV) - 1
+        float c = array.get(ltfC, i)
+        float o = array.get(ltfO, i)
+        float v = nz(array.get(ltfV, i), 0.0)
+        ltfTotal += v
+        estDelta += c > o ? v : c < o ? -v : 0.0
+    deltaFromLtf := ltfTotal > 0
+if useDelta and not deltaFromLtf
+    estDelta := nz(volume, 0.0) * (2.0 * closePos - 1.0)
+deltaAvg = ta.sma(math.abs(estDelta), 14)
+deltaStrong = not na(deltaAvg) and deltaAvg > 0 and math.abs(estDelta) > deltaAvg
+deltaBull = useDelta and estDelta > 0 and deltaStrong
+deltaBear = useDelta and estDelta < 0 and deltaStrong
+deltaTxt = not useDelta ? "off" : str.tostring(estDelta, "#") +
+     (deltaStrong ? " strong " : " normal ") + (estDelta > 0 ? "▲" : "▼") +
+     "  [" + (deltaFromLtf ? ltfRes + "m intrabar" : "close-position proxy") + "]"
+
+// ═══════════════ STEP 2 — LIKELY LIQUIDITY AND POINTS OF INTEREST ═══════════
+// Marked BEFORE any entry is considered. Note the language throughout: these
+// are LIKELY liquidity and POTENTIAL stop clusters. A visible high is not proof
+// that orders rest above it — Pine cannot see anyone's orders.
+
+eqT = atr * eqTol
+poolHi = ta.highest(high, liqLook)[1]
+poolLo = ta.lowest(low, liqLook)[1]
+eqHigh = not na(exHi) and not na(exHiPrev) and math.abs(exHi - exHiPrev) <= eqT
+eqLow = not na(exLo) and not na(exLoPrev) and math.abs(exLo - exLoPrev) <= eqT
+
+// Quality = how many INDEPENDENT things overlap this price. A zone that is only
+// a swing low is a swing low; a zone that is a swing low, the previous day low,
+// the Wyckoff range floor and a Fibonacci level is a point of interest.
+poiQuality(float px, int dir) =>
+    int q = 1
+    q += (dir == 1 ? (not na(pdl) and math.abs(px - pdl) <= zoneW) :
+         (not na(pdh) and math.abs(px - pdh) <= zoneW)) ? 1 : 0
+    q += (dir == 1 ? (not na(h1Low) and math.abs(px - h1Low) <= zoneW * 1.5) :
+         (not na(h1High) and math.abs(px - h1High) <= zoneW * 1.5)) ? 1 : 0
+    q += (dir == 1 ? (not na(m15Low) and math.abs(px - m15Low) <= zoneW) :
+         (not na(m15High) and math.abs(px - m15High) <= zoneW)) ? 1 : 0
+    q += (dir == 1 ? ((not na(asiaLo) and math.abs(px - asiaLo) <= zoneW) or
+         (not na(ldnLo) and math.abs(px - ldnLo) <= zoneW)) :
+         ((not na(asiaHi) and math.abs(px - asiaHi) <= zoneW) or
+         (not na(ldnHi) and math.abs(px - ldnHi) <= zoneW))) ? 1 : 0
+    q += (rangeOk and (dir == 1 ? math.abs(px - rLo) <= zoneW :
+         math.abs(px - rHi) <= zoneW)) ? 1 : 0
+    q += nearFib(px) ? 1 : 0
+    math.min(6, q)
+
+var array<Poi> pois = array.new<Poi>()
+
+// Merge into an existing zone if one is already there, otherwise create it.
+// Re-marking the same price ten times is not ten points of interest.
+addPoi(float top, float bot, int dir, string kind) =>
+    if not na(top) and not na(bot) and top > bot
+        float mid = (top + bot) / 2.0
+        int found = -1
+        if array.size(pois) > 0
+            for i = 0 to array.size(pois) - 1
+                Poi p = array.get(pois, i)
+                if p.dir == dir and math.abs((p.top + p.bot) / 2.0 - mid) <= zoneW
+                    found := i
+                    break
+        if found >= 0
+            Poi p = array.get(pois, found)
+            p.top := math.max(p.top, top)
+            p.bot := math.min(p.bot, bot)
+            p.quality := math.max(p.quality, poiQuality(mid, dir))
+            p.bar := bar_index
+        else
+            array.push(pois, Poi.new(top, bot, bar_index, dir, kind,
+                 poiQuality(mid, dir), 0, float(na), 0))
+
+// Sources. Displacement origins give demand and supply; confirmed external
+// swings give support and resistance; session and prior-day extremes and equal
+// highs/lows give the likely liquidity that Step 4 will attack.
+if confirmed and dispBull and close[1] < open[1]
+    addPoi(math.max(open[1], close[1]), low[1], 1, "demand")
+if confirmed and dispBear and close[1] > open[1]
+    addPoi(high[1], math.min(open[1], close[1]), -1, "supply")
+if confirmed and not na(pvLoEx)
+    addPoi(pvLoEx + zoneW, pvLoEx - zoneW, 1, eqLow ? "equal lows" : "swing support")
+if confirmed and not na(pvHiEx)
+    addPoi(pvHiEx + zoneW, pvHiEx - zoneW, -1, eqHigh ? "equal highs" : "swing resistance")
+if confirmed and not na(pdl) and low <= pdl + zoneW and low > pdl - zoneW * 3
+    addPoi(pdl + zoneW, pdl - zoneW, 1, "previous day low")
+if confirmed and not na(pdh) and high >= pdh - zoneW and high < pdh + zoneW * 3
+    addPoi(pdh + zoneW, pdh - zoneW, -1, "previous day high")
+
+// Retire POIs that expired or failed. Walked backwards so removal cannot skip
+// an element, and array.remove returns a value so it is captured explicitly.
+if array.size(pois) > 0
+    for i = array.size(pois) - 1 to 0
+        Poi p = array.get(pois, i)
+        if bar_index - p.bar > poiLife or p.state == 3
+            Poi dropped = array.remove(pois, i)
+// Capping is a SEPARATE step. Folding it into the loop above dropped the
+// highest indices — the newest and usually most relevant zones — because that
+// loop descends. The cap must drop the oldest, which is the front.
+if array.size(pois) > poiMax
+    for i = 1 to array.size(pois) - poiMax
+        Poi oldest = array.shift(pois)
+
+// ═══════════════════ STEP 3 — MITIGATION ════════════════════════════════════
+// Approaching a POI is not mitigation. Price must reach it and interact with
+// it, and the KIND of interaction decides whether the zone is still tradable:
+// rejection keeps it, acceptance kills it.
+
+// The selected POI is COPIED onto the state rather than referenced by index.
+// Array indices go stale the moment a zone is retired, and a stale index is a
+// silent wrong-zone bug rather than an error.
+pickPoi(int dir) =>
+    float bt = na
+    float bb = na
+    int bq = 0
+    string bk = ""
+    float bestD = 1.0e10
+    if array.size(pois) > 0
+        for i = 0 to array.size(pois) - 1
+            Poi p = array.get(pois, i)
+            if p.dir == dir and p.state != 3 and p.quality >= minQuality
+                float mid = (p.top + p.bot) / 2.0
+                bool rightSide = dir == 1 ? mid <= close + zoneW : mid >= close - zoneW
+                float d = math.abs(close - mid)
+                if rightSide and d < bestD
+                    bestD := d
+                    bt := p.top
+                    bb := p.bot
+                    bq := p.quality
+                    bk := p.kind
+    [bt, bb, bq, bk]
+
+var float poiTop = na
+var float poiBot = na
+var int poiDir = 0
+var int poiQual = 0
+var string poiKind = ""
+var int poiTouch = 0
+var float poiDeep = na
+var int poiInside = 0
+var string mitigTxt = "none"
+
+hasPoi = not na(poiTop) and not na(poiBot)
+// The seven interactions the brief names, evaluated against the selected zone.
+touching = hasPoi and high >= poiBot and low <= poiTop
+insideClose = hasPoi and close <= poiTop and close >= poiBot
+penetrated = hasPoi and (poiDir == 1 ? close < poiBot : close > poiTop)
+rejected = hasPoi and touching and
+     (poiDir == 1 ? close > poiTop and loWick >= body * 0.8 : close < poiBot and upWick >= body * 0.8)
+deeper = hasPoi and not na(poiDeep) and
+     (poiDir == 1 ? low < poiDeep : high > poiDeep)
+
+if confirmed and hasPoi and touching and not touching[1]
+    poiTouch += 1
+if confirmed and hasPoi and touching
+    poiDeep := na(poiDeep) ? (poiDir == 1 ? low : high) :
+         (poiDir == 1 ? math.min(poiDeep, low) : math.max(poiDeep, high))
+// Acceptance: price SITTING in the zone rather than being pushed out of it.
+// A zone being accepted is a zone that has stopped working.
+if confirmed and insideClose
+    poiInside += 1
+else if confirmed and not touching
+    poiInside := 0
+
+accepted = poiInside >= acceptBars
+poiFailed = hasPoi and (penetrated and confirmed and poiInside >= 1 or accepted)
+mitigated = hasPoi and poiTouch >= 1 and not accepted and not poiFailed
+
+if confirmed and hasPoi
+    mitigTxt := poiFailed ? "FAILED — zone no longer valid" :
+         accepted ? "acceptance — zone being absorbed, not defended" :
+         rejected and poiTouch > 1 ? "retest rejected" :
+         rejected ? "first-touch rejection" :
+         deeper ? "deeper mitigation" :
+         poiTouch > 1 ? "retest" : poiTouch == 1 ? "first touch" :
+         "approaching — not yet mitigated"
+
+// ═════════════ STEP 4 — LIQUIDITY SWEEP + ENTRY MODEL ═══════════════════════
+// The sweep is the trigger, but a sweep on its own is nothing. It only counts
+// after a mitigated POI, and it only leads anywhere if structure then shifts.
+
+// The level a sweep took. Named so the alert can say what was actually run.
+pickLo = not na(pdl) and low < pdl ? pdl : not na(asiaLo) and low < asiaLo ? asiaLo :
+     not na(m15Low) and low < m15Low ? m15Low : poolLo
+pickHi = not na(pdh) and high > pdh ? pdh : not na(asiaHi) and high > asiaHi ? asiaHi :
+     not na(m15High) and high > m15High ? m15High : poolHi
+nameLevel(float lvl, bool up) =>
+    not na(up ? pdh : pdl) and math.abs(lvl - (up ? pdh : pdl)) < eqT ?
+     "previous day " + (up ? "high" : "low") :
+     not na(up ? asiaHi : asiaLo) and math.abs(lvl - (up ? asiaHi : asiaLo)) < eqT ?
+     "Asian session " + (up ? "high" : "low") :
+     not na(up ? ldnHi : ldnLo) and math.abs(lvl - (up ? ldnHi : ldnLo)) < eqT ?
+     "London " + (up ? "high" : "low") :
+     (up ? eqHigh : eqLow) ? "equal " + (up ? "highs" : "lows") :
+     "swing " + (up ? "high" : "low")
+
+// Through the level, then CLOSED back inside. A close beyond it is a break.
+sweepBull = not na(pickLo) and low < pickLo and close > pickLo
+sweepBear = not na(pickHi) and high > pickHi and close < pickHi
+
+liqTxt = not na(poolHi) and not na(poolLo) ?
+     "likely sell-side " + str.tostring(poolLo, format.mintick) + " · likely buy-side " +
+     str.tostring(poolHi, format.mintick) +
+     (eqLow ? " · equal lows (potential stop cluster)" :
+      eqHigh ? " · equal highs (potential stop cluster)" : "") : "n/a"
+
+// ═══════════════════ STEP 5 — RISK GEOMETRY ═════════════════════════════════
+
+riskCash = acctSize * riskPct / 100.0
+maxStopPips = riskCash / (minLot * PIPVAL)
+spreadPrice = spreadPips * PIP
+minTpPrice = spreadPips * 3.0 * PIP
+
+lotsFor(float riskPrice) =>
+    float sp = riskPrice / PIP
+    float raw = sp > 0 ? riskCash / (sp * PIPVAL) : na
+    na(raw) ? na : math.max(math.floor(raw / minLot) * minLot, minLot)
+cashRisk(float riskPrice, float lots) =>
+    na(lots) ? na : (riskPrice / PIP) * lots * PIPVAL
+
+// Targets come from real opposing levels, in the brief's priority order.
+fold(float bst, float snd, float c, float ref, bool up) =>
+    float b = bst
+    float s = snd
+    if not na(c) and (up ? c > ref : c < ref)
+        if na(b) or (up ? c < b : c > b)
+            s := b
+            b := c
+        else if (na(s) or (up ? c < s : c > s)) and c != b
+            s := c
+    [b, s]
+
+ladder(bool up) =>
+    float ref = up ? close + minTpPrice : close - minTpPrice
+    [a1, b1] = fold(float(na), float(na), up ? poolHi : poolLo, ref, up)
+    [a2, b2] = fold(a1, b1, up ? exHi : exLo, ref, up)
+    [a3, b3] = fold(a2, b2, up ? m15High : m15Low, ref, up)
+    [a4, b4] = fold(a3, b3, up ? h1High : h1Low, ref, up)
+    [a5, b5] = fold(a4, b4, up ? asiaHi : asiaLo, ref, up)
+    [a6, b6] = fold(a5, b5, up ? ldnHi : ldnLo, ref, up)
+    [a7, b7] = fold(a6, b6, up ? pdh : pdl, ref, up)
+    [a8, b8] = fold(a7, b7, rangeOk ? (up ? rHi : rLo) : float(na), ref, up)
+    [a8, b8]
+
+[upT1, upT2] = ladder(true)
+[dnT1, dnT2] = ladder(false)
+
+// ═══════════════════ THE ORDERED STATE MACHINE ══════════════════════════════
+//  0 IDLE · 1 BIAS · 2 POI IDENTIFIED · 3 WAITING MITIGATION · 4 MITIGATED
+//  5 WAITING SWEEP · 6 LIQUIDITY SWEPT · 7 WAITING MSS
+//  8 WAITING CONFIRMATION · 9 ACTIVE
+// A state can ONLY be entered from the one before it. That is the framework's
+// "do not skip steps" rule expressed as code rather than as a comment: a sweep
+// with no mitigated POI never reaches state 6, and an MSS with no sweep never
+// reaches state 7, no matter how good everything else looks.
+
+var int st = 0
+var int stDir = 0
+var int stBar = na
+var int stStart = na
+var string stType = ""
+var string stWhy = ""
+var int stScore = 0
+var float sweepLevel = na
+var float protLevel = na        // the protected low / high, once confirmed
+var bool protConfirmed = false
+var int sweepBar = na
+var string sweptWhat = ""
+var int mssBar = na
+
+envBlock = not isGold ? "not a gold symbol — the pip and contract maths here is XAUUSD only" :
+     warnTf and not on5m ? "not a 5m chart — this framework is tuned for 5m XAUUSD" :
+     dead ? "volatility too low (ATR " + str.tostring(atrPips, "#.#") + " pips)" :
+     not sessionOk ? "outside London / New York" : ""
+
+// ── Reset conditions, evaluated BEFORE any promotion ────────────────────────
+devState = st >= 1 and st <= 8
+staleMitig = st >= 2 and st <= 5 and not na(stStart) and
+     bar_index - stStart > mitigMax
+sweepStale = (st == 6 and not na(sweepBar) and bar_index - sweepBar > sweepLife) or
+     (st == 7 and not na(sweepBar) and bar_index - sweepBar > sweepLife + mssWin)
+confStale = st == 8 and not na(mssBar) and bar_index - mssBar > confirmWin
+biasLost = devState and (stDir != 0 and bias != stDir)
+poiDead = st >= 2 and st <= 7 and poiFailed
+resetNow = confirmed and devState and
+     (staleMitig or sweepStale or confStale or biasLost or poiDead or envBlock != "")
+
+if resetNow
+    stWhy := poiDead ? "the POI failed — price accepted the zone instead of rejecting it" :
+         biasLost ? "1H/15M bias changed against the setup" :
+         confStale ? "no confirmation candle closed in time" :
+         sweepStale ? "no structure shift followed the sweep" :
+         staleMitig ? "POI never mitigated" : "conditions no longer suitable"
+    st := 0
+    stDir := 0
+    stType := ""
+    poiTop := na
+    poiBot := na
+    poiDir := 0
+    poiTouch := 0
+    poiDeep := na
+    poiInside := 0
+    sweepLevel := na
+    protLevel := na
+    protConfirmed := false
+
+// ── 0 → 1  BIAS. Step 1 must produce a direction before anything else. ──────
+if confirmed and st == 0 and not resetNow and envBlock == "" and bias != 0 and biasOk
+    st := 1
+    stDir := bias
+    stStart := bar_index
+    stBar := bar_index
+
+// ── 1 → 2  POI IDENTIFIED. Step 2. Marked before an entry is considered. ────
+[pTop, pBot, pQual, pKind] = pickPoi(stDir)
+if confirmed and st == 1 and not na(pTop)
+    st := 2
+    stBar := bar_index
+    poiTop := pTop
+    poiBot := pBot
+    poiDir := stDir
+    poiQual := pQual
+    poiKind := pKind
+    poiTouch := 0
+    poiDeep := na
+    poiInside := 0
+
+// ── 2 → 3  WAITING MITIGATION once price is within reach of the zone. ───────
+approaching = hasPoi and (poiDir == 1 ? low <= poiTop + atr * 1.5 :
+     high >= poiBot - atr * 1.5)
+if confirmed and st == 2 and approaching
+    st := 3
+    stBar := bar_index
+
+// ── 3 → 4  MITIGATED. Step 3: touched AND not accepted. ─────────────────────
+if confirmed and st == 3 and mitigated
+    st := 4
+    stBar := bar_index
+
+// ── 4 → 5  WAITING SWEEP, then 5 → 6 LIQUIDITY SWEPT. Step 4 begins. ────────
+// Same-bar 4→5 is legitimate: price routinely enters demand and wicks through
+// the low beneath it on one candle. 6 onward cannot be same-bar.
+if confirmed and st == 4
+    st := 5
+    stBar := bar_index
+
+if confirmed and st == 5 and (stDir == 1 ? sweepBull : sweepBear)
+    st := 6
+    stBar := bar_index
+    sweepBar := bar_index
+    // CANDIDATE protected level only. The first wick is not protection.
+    sweepLevel := stDir == 1 ? low : high
+    protConfirmed := false
+    sweptWhat := nameLevel(stDir == 1 ? pickLo : pickHi, stDir == -1)
+
+// ── 6 → 7  WAITING MSS, once the sweep has been rejected rather than ────────
+// simply extended. This is where the candidate becomes the protected level.
+sweepHeld = st >= 6 and not na(sweepLevel) and
+     (stDir == 1 ? low >= sweepLevel : high <= sweepLevel)
+rejectedSweep = st == 6 and sweepHeld and
+     (stDir == 1 ? close > open or loWick >= body : close < open or upWick >= body)
+if confirmed and rejectedSweep
+    st := 7
+    stBar := bar_index
+
+// ── 7 → 8  WAITING CONFIRMATION. Structure must shift in our direction. ─────
+mssNow = stDir == 1 ? (mssUp or chochUp) : (mssDn or chochDn)
+dispNow = not needDisplacement or (stDir == 1 ? dispBull : dispBear)
+volNow = not needVolume or volExp
+if confirmed and st == 7 and mssNow and sweepHeld
+    st := 8
+    stBar := bar_index
+    mssBar := bar_index
+    // The sweep extreme has now been rejected AND structure has shifted, so it
+    // is finally a protected level and can carry the stop.
+    protLevel := sweepLevel
+    protConfirmed := true
+
+// ── 8 → 9  CONFIRMED. A LATER candle must close in our direction. ───────────
+var int lastSigBar = -9999
+coolOk = bar_index - lastSigBar >= cooldown
+bullCandle = (close > open and bodyPct >= 0.5) or
+     (close > open and loWick >= body and close > barMid)
+bearCandle = (close < open and bodyPct >= 0.5) or
+     (close < open and upWick >= body and close < barMid)
+
+// ═══════════════ STEP 5 — STOP AND TARGETS FROM THE PROTECTED LEVEL ═════════
+// The stop sits beyond the PROTECTED low/high — the sweep extreme, but only
+// once the market has rejected it and structure has shifted. Until then there
+// is no protected level and a fallback swing is used, which is also why a
+// setup cannot confirm before state 8.
+
+swingLo5 = ta.lowest(low, 5)
+swingHi5 = ta.highest(high, 5)
+slRefLong = protConfirmed and not na(protLevel) ? protLevel : math.min(swingLo5, low)
+slRefShort = protConfirmed and not na(protLevel) ? protLevel : math.max(swingHi5, high)
+riskLong = math.max(close - slRefLong + atr * slBufAtr, atr * slFloorAtr) + spreadPrice
+riskShort = math.max(slRefShort - close + atr * slBufAtr, atr * slFloorAtr) + spreadPrice
+slLong = close - riskLong
+slShort = close + riskShort
+
+tp1L = na(upT1) ? close + riskLong * 1.5 : upT1 - spreadPrice
+tp1S = na(dnT1) ? close - riskShort * 1.5 : dnT1 + spreadPrice
+tp2Lraw = na(upT2) ? close + riskLong * 2.5 : upT2 - spreadPrice
+tp2Sraw = na(dnT2) ? close - riskShort * 2.5 : dnT2 + spreadPrice
+tp2L = math.max(tp2Lraw, tp1L + minTpPrice)
+tp2S = math.min(tp2Sraw, tp1S - minTpPrice)
+
+rr1L = riskLong > 0 ? (tp1L - close) / riskLong : na
+rr1S = riskShort > 0 ? (close - tp1S) / riskShort : na
+rr2L = riskLong > 0 ? (tp2L - close) / riskLong : na
+rr2S = riskShort > 0 ? (close - tp2S) / riskShort : na
+spaceL = tp1L - close >= minTpPrice
+spaceS = close - tp1S >= minTpPrice
+rrOkL = not na(rr1L) and rr1L >= minRR
+rrOkS = not na(rr1S) and rr1S >= minRR
+sizeOkL = riskLong / PIP <= maxStopPips
+sizeOkS = riskShort / PIP <= maxStopPips
+
+// ═══════════ CONFLUENCE SCORE — the Step 4A hierarchy, weighted ═════════════
+// Weights follow the hierarchy order: context and structure outrank order flow,
+// which outranks momentum, which outranks EMA. Correlated evidence shares a
+// bucket — RSI and MACD together, order-flow proxy and estimated delta together
+// — because they are views of the same data, not independent confirmations.
+// The score RANKS setups that already passed all five steps. It can never let
+// one skip a step, and it cannot override structural invalidation.
+
+scoreFor(int dir) =>
+    bool up = dir == 1
+    int sc = 0
+    sc += (up ? bias1h == 1 : bias1h == -1) ? 12 : bias1h == 0 ? 5 : 0     // 1 1H
+    sc += (up ? bias15 == 1 : bias15 == -1) ? 12 : bias15 == 0 ? 5 : 0     // 2 15M
+    sc += hasPoi ? math.min(12, poiQual * 2) : 0                           // 3 POI
+    sc += (up ? (eqLow or not na(poolLo)) : (eqHigh or not na(poolHi))) ? 8 : 3  // 4 liq
+    sc += st >= 6 ? 10 : 0                                                 // 5 sweep
+    sc += st >= 8 ? 10 : st == 7 ? 4 : 0                                   // 6 MSS
+    sc += (up ? dispBull : dispBear) ? 8 : 3                               // 7 displacement
+    sc += not useWyckoff ? 3 : (up ? wyBull : wyBear) ? 6 :
+         (up ? wyBear : wyBull) ? 0 : 3                                    // 8 Wyckoff
+    sc += not volKnown ? 2 : volExp ? 5 : volDry ? 1 : 3                   // 9 volume
+    // 10 + 11 share one bucket: the footprint proxy and estimated delta are
+    // computed from the same lower-timeframe data.
+    sc += not useDelta ? 3 : (up ? deltaBull : deltaBear) ? 6 :
+         (up ? absorbLo : absorbHi) ? 5 : (up ? deltaBear : deltaBull) ? 0 : 3
+    // 12 + 14 share one bucket: RSI and MACD are both momentum.
+    int mn = ((up ? rsi > 50 : rsi < 50) ? 1 : 0) +
+         ((up ? macdHist > macdHist[1] : macdHist < macdHist[1]) ? 1 : 0)
+    sc += mn == 2 ? 5 : mn == 1 ? 3 : 0
+    sc += (up ? (ema20 > ema50 and slope20 > 0) : (ema20 < ema50 and slope20 < 0)) ? 2 : 0
+    sc += ((up ? spaceL : spaceS) ? 2 : 0) + ((up ? rrOkL : rrOkS) ? 2 : 0)
+    math.min(100, sc)
+
+scoreL = scoreFor(1)
+scoreS = scoreFor(-1)
+gradeOf(int s) =>
+    s >= 90 ? "A+ extreme confluence" : s >= 85 ? "A high confluence" :
+     s >= 75 ? "watch" : s >= 65 ? "weak" : "no trade"
+
+// ═══════════════════════ HARD BLOCKERS ══════════════════════════════════════
+// Checked at the moment of confirmation. None of these can be outvoted.
+
+blockFor(int dir) =>
+    bool up = dir == 1
+    envBlock != "" ? envBlock :
+     not biasOk ? "1H and 15M disagree — the framework says WAIT" :
+     not hasPoi ? "no qualifying POI in the bias direction" :
+     poiQual < minQuality ? "POI quality " + str.tostring(poiQual) + "/" +
+     str.tostring(minQuality) + " — not enough overlapping confluence" :
+     chasing ? "price is " + str.tostring(extFromEma, "#.#") +
+     " ATR from value — that is chasing, wait for a pullback" :
+     not protConfirmed ? "protected " + (up ? "low" : "high") +
+     " not established — the first wick is not protection" :
+     not (up ? spaceL : spaceS) ? "insufficient target space" :
+     not (up ? rrOkL : rrOkS) ? "R:R " + str.tostring(up ? rr1L : rr1S, "#.##") +
+     " below " + str.tostring(minRR, "#.#") + " — the stop will not be moved to fix it" :
+     not (up ? sizeOkL : sizeOkS) ? "RISK — stop " +
+     str.tostring((up ? riskLong : riskShort) / PIP, "#.#") + " pips exceeds " +
+     str.tostring(riskPct, "#.#") + "% of $" + str.tostring(acctSize, "#") +
+     " at " + str.tostring(minLot) + " lot" :
+     not volNow ? "volume expansion required but absent" :
+     not dispNow ? "displacement required but absent" :
+     (up ? scoreL : scoreS) < minScore ? "confluence " +
+     str.tostring(up ? scoreL : scoreS) + "/" + str.tostring(minScore) : ""
+
+clearL = blockFor(1) == ""
+clearS = blockFor(-1) == ""
+
+// The confirmation candle must be a LATER bar than the MSS. This single
+// condition is the whole of the non-repainting requirement for entries.
+canConfirm = confirmed and st == 8 and bar_index > mssBar and coolOk and
+     (stDir == 1 ? clearL and bullCandle : clearS and bearCandle)
+fireL = canConfirm and stDir == 1
+fireS = canConfirm and stDir == -1
+
+// REVERSAL vs CONTINUATION. A pullback inside the prevailing trend that
+// resumes is a continuation; a setup against the 5M trend is a reversal.
+setupType = stDir == 0 ? "" :
+     (stDir == 1 and trendDir == -1) or (stDir == -1 and trendDir == 1) ?
+     "REVERSAL" : "CONTINUATION"
+
+// ═══════════════════ POST-CONFIRMATION MANAGEMENT ═══════════════════════════
+// The indicator does NOT stop analysing after entry. Reaching a target and
+// being invalidated are different events and are checked in that order.
+
+var float tEntry = na
+var float tSL = na
+var float tTP1 = na
+var float tTP2 = na
+var bool tp1Done = false
+var bool tp2Done = false
+var bool beSaid = false
+var int tBar = na
+var int nSignals = 0
+var int nTp1 = 0
+var int nStopped = 0
+
+if fireL or fireS
+    lastSigBar := bar_index
+    st := 9
+    stScore := fireL ? scoreL : scoreS
+    stType := setupType
+    tEntry := close
+    tSL := fireL ? slLong : slShort
+    tTP1 := fireL ? tp1L : tp1S
+    tTP2 := fireL ? tp2L : tp2S
+    tp1Done := false
+    tp2Done := false
+    beSaid := false
+    tBar := bar_index
+    nSignals += 1
+
+active = st == 9 and stDir != 0
+
+// Intrabar reach drives the DEVELOPING notice only. It is never treated as a
+// confirmed take-profit: an intrabar touch can be given back before the close.
+tp1Touch = active and not tp1Done and (stDir == 1 ? high >= tTP1 : low <= tTP1)
+tp2Touch = active and not tp2Done and (stDir == 1 ? high >= tTP2 : low <= tTP2)
+tpDeveloping = (tp1Touch or tp2Touch) and not confirmed
+
+hitTp1 = confirmed and active and not tp1Done and
+     (stDir == 1 ? high >= tTP1 : low <= tTP1)
+hitTp2 = confirmed and active and not tp2Done and
+     (stDir == 1 ? high >= tTP2 : low <= tTP2)
+
+// Invalidation is STRUCTURAL. Not an indicator changing colour, and not one
+// pullback candle. The protected level breaking is the primary case, because
+// that level is the entire basis of the trade.
+protBroken = confirmed and active and protConfirmed and not na(protLevel) and
+     (stDir == 1 ? close < protLevel : close > protLevel)
+hitSL = confirmed and active and (stDir == 1 ? low <= tSL : high >= tSL)
+mssAgainst = confirmed and active and
+     (stDir == 1 ? (mssDn or chochDn or bosDn) : (mssUp or chochUp or bosUp))
+hitTime = confirmed and active and not na(tBar) and bar_index - tBar >= maxHold
+cancelNow = (protBroken or hitSL or mssAgainst) and not hitTp2
+cancelWhy = protBroken ? (stDir == 1 ? "protected low broken" : "protected high broken") :
+     hitSL ? "structural stop taken" :
+     mssAgainst ? (stDir == 1 ? "bearish MSS against the long" :
+     "bullish MSS against the short") : ""
+
+if hitTp1
+    tp1Done := true
+    nTp1 += 1
+if hitTp2
+    tp2Done := true
+beSuggest = beAfterTp1 and tp1Done and not beSaid and active and not hitTp2
+if beSuggest
+    beSaid := true
+
+if confirmed and active and (hitTp2 or cancelNow or hitTime)
+    if hitSL or protBroken
+        nStopped += 1
+    stWhy := hitTp2 ? "TP2 reached" : cancelNow ? cancelWhy : "time stop"
+    st := 0
+    stDir := 0
+    poiTop := na
+    poiBot := na
+    poiDir := 0
+    protLevel := na
+    protConfirmed := false
+    sweepLevel := na
+
+// Two separate numbers, never combined. The score is evidence agreeing now;
+// this is what happened to past signals on the loaded bars, in-sample only.
+nClosed = nTp1 + nStopped
+histTxt = nSignals == 0 ? "no signals yet on these bars" :
+     nClosed < 25 ? "insufficient sample — " + str.tostring(nClosed) +
+     " resolved of " + str.tostring(nSignals) + " fired" :
+     str.tostring(nTp1 * 100.0 / nClosed, "#.#") + "% reached TP1 first · n=" +
+     str.tostring(nClosed) + " (in-sample, not a forecast)"
+
+// ═══════════════════════ STATE DISPLAY ══════════════════════════════════════
+
+stateName = st == 0 ? "IDLE" : st == 1 ? "BIAS" : st == 2 ? "POI IDENTIFIED" :
+     st == 3 ? "WAITING FOR MITIGATION" : st == 4 ? "MITIGATED" :
+     st == 5 ? "WAITING FOR LIQUIDITY SWEEP" : st == 6 ? "LIQUIDITY SWEPT" :
+     st == 7 ? "WAITING FOR MSS" : st == 8 ? "WAITING FOR CONFIRMATION CANDLE" :
+     tpDeveloping ? "ACTIVE · TP DEVELOPING" : tp1Done ? "ACTIVE · TP1 CONFIRMED" : "ACTIVE"
+
+stepNo = st == 0 ? 0 : st == 1 ? 1 : st <= 2 ? 2 : st <= 4 ? 3 : st <= 8 ? 4 : 5
+stepTxt = st == 0 ? "—" : "STEP " + str.tostring(stepNo) + " of 5  ·  " +
+     (stepNo == 1 ? "trend direction" : stepNo == 2 ? "liquidity + POI" :
+      stepNo == 3 ? "mitigation" : stepNo == 4 ? "sweep + entry model" :
+      "targets + stop")
+
+nextTxt = st == 0 ? "waiting for 1H/15M to produce a direction" :
+     st == 1 ? "waiting for a qualifying POI in the bias direction" :
+     st == 2 ? "waiting for price to reach the POI" :
+     st == 3 ? "waiting for mitigation — " + mitigTxt :
+     st == 4 or st == 5 ? "waiting for a sweep of " +
+     (stDir == 1 ? "sell-side" : "buy-side") + " liquidity" :
+     st == 6 ? "waiting for the sweep to be rejected, not extended" :
+     st == 7 ? "waiting for a market structure shift " + (stDir == 1 ? "up" : "down") :
+     st == 8 ? (stDir == 1 ? "waiting for a bullish candle to CLOSE" :
+     "waiting for a bearish candle to CLOSE") :
+     active ? "managing — TP1 " + str.tostring(tTP1, format.mintick) + " · SL " +
+     str.tostring(tSL, format.mintick) : "—"
+
+status = fireL ? "BUY CONFIRMED" : fireS ? "SELL CONFIRMED" :
+     active ? "ACTIVE" : st == 8 ? "WAIT FOR CONFIRMATION" :
+     st >= 1 ? "WATCH" : envBlock != "" ? "NO TRADE" : "NO TRADE"
+statusTxt = status == "BUY CONFIRMED" ? "🟢 BUY CONFIRMED" :
+     status == "SELL CONFIRMED" ? "🔴 SELL CONFIRMED" :
+     status == "ACTIVE" ? (stDir == 1 ? "🟢 LONG ACTIVE" : "🔴 SHORT ACTIVE") :
+     status == "WAIT FOR CONFIRMATION" ?
+     (stDir == 1 ? "🟡 WAIT — BUY CONFIRMATION" : "🟡 WAIT — SELL CONFIRMATION") :
+     status == "WATCH" ? "⚪ WATCH" : "⚫ NO TRADE"
+statusCol = status == "BUY CONFIRMED" or (status == "ACTIVE" and stDir == 1) ? colBull :
+     status == "SELL CONFIRMED" or (status == "ACTIVE" and stDir == -1) ? colBear :
+     status == "WAIT FOR CONFIRMATION" ? colStep :
+     status == "WATCH" ? colNeut : colDead
+
+whyTxt = status == "BUY CONFIRMED" or status == "SELL CONFIRMED" ? "—" :
+     st >= 1 ? nextTxt :
+     blockFor(bias == 0 ? 1 : bias) != "" ? blockFor(bias == 0 ? 1 : bias) :
+     "waiting for a direction"
+
+// ══════════════════════════════ DRAWING ═════════════════════════════════════
+
+var array<label> lblPool = array.new<label>()
+mark(string txt, color c, bool above, string tip) =>
+    label lb = label.new(bar_index, above ? high : low, txt,
+         xloc = xloc.bar_index, yloc = yloc.price,
+         style = above ? label.style_label_down : label.style_label_up,
+         color = color.new(c, 15), textcolor = color.white, size = size.tiny,
+         tooltip = tip)
+    array.push(lblPool, lb)
+    if array.size(lblPool) > 70
+        label.delete(array.shift(lblPool))
+
+var array<line> lnPool = array.new<line>()
+pushLine(line l) =>
+    array.push(lnPool, l)
+    if array.size(lnPool) > 24
+        line.delete(array.shift(lnPool))
+
+// POI zones. Drawn from the live array, capped, and recycled rather than
+// recreated so the drawing limit is never the thing that breaks the script.
+var array<box> poiBoxes = array.new<box>()
+if barstate.islast and showPoi
+    // Clear and redraw only on the last bar: POIs change state constantly and
+    // redrawing every bar would exhaust the box budget within a session.
+    if array.size(poiBoxes) > 0
+        for i = array.size(poiBoxes) - 1 to 0
+            box dropped = array.remove(poiBoxes, i)
+            box.delete(dropped)
+    if array.size(pois) > 0
+        for i = 0 to array.size(pois) - 1
+            Poi p = array.get(pois, i)
+            color c = p.dir == 1 ? colDemand : colSupply
+            int shade = p.quality >= 4 ? 78 : p.quality >= 3 ? 85 : 91
+            array.push(poiBoxes, box.new(p.bar, p.top, bar_index + 3, p.bot,
+                 border_color = color.new(c, 55), bgcolor = color.new(c, shade),
+                 text = p.kind + " Q" + str.tostring(p.quality),
+                 text_color = color.new(c, 25), text_size = size.tiny,
+                 text_halign = text.align_left))
+
+// Step progress. One label per transition, never one per bar.
+stepChanged = confirmed and st != st[1] and st >= 1 and st <= 8
+if showSteps and stepChanged
+    mark("S" + str.tostring(stepNo) + " · " + stateName, colStep, stDir == -1,
+         stepTxt + "\n" + "Direction: " + (stDir == 1 ? "BULLISH" : "BEARISH") +
+         "  (" + setupType + ")\n" +
+         "POI: " + poiKind + "  quality " + str.tostring(poiQual) + "/6\n" +
+         "Mitigation: " + mitigTxt + "\n" +
+         "Next: " + nextTxt + "\n\n" +
+         "This is progress through the framework, NOT an entry.")
+
+if showSteps and confirmed and resetNow
+    mark("RESET", colNeut, true, "SETUP CANCELLED — " + stWhy +
+         "\n\nThe pipeline returns to IDLE. Nothing from the cancelled setup carries over.")
+
+plotshape(showLiq and confirmed and sweepBull ? low - atr * 0.4 : na,
+     "Sell-side sweep", shape.xcross, location.absolute, colLiqC, size = size.tiny)
+plotshape(showLiq and confirmed and sweepBear ? high + atr * 0.4 : na,
+     "Buy-side sweep", shape.xcross, location.absolute, colLiqC, size = size.tiny)
+
+if showStruct and confirmed and (mssUp or mssDn) and st >= 6
+    pushLine(line.new(bar_index - 1, mssUp ? nz(inHi, close) : nz(inLo, close),
+         bar_index + 2, mssUp ? nz(inHi, close) : nz(inLo, close),
+         xloc = xloc.bar_index, color = color.new(colStep, 25),
+         style = line.style_dashed, width = 2))
+
+// The protected level — the single most important line on the chart, because
+// it is both the stop and the invalidation.
+var line protLine = na
+if barstate.islast
+    line.delete(protLine)
+    if protConfirmed and not na(protLevel) and showTradeLn
+        protLine := line.new(nz(sweepBar, bar_index), protLevel, bar_index + 5,
+             protLevel, xloc = xloc.bar_index, color = color.new(colLiqC, 10),
+             style = line.style_solid, width = 2)
+
+drawEntry(int dir) =>
+    color c = dir == 1 ? colBull : colBear
+    int rt = bar_index + maxHold
+    pushLine(line.new(bar_index, tEntry, rt, tEntry, xloc = xloc.bar_index,
+         color = color.new(colEntryC, 30)))
+    pushLine(line.new(bar_index, tSL, rt, tSL, xloc = xloc.bar_index,
+         color = colBear, style = line.style_dashed, width = 2))
+    pushLine(line.new(bar_index, tTP1, rt, tTP1, xloc = xloc.bar_index,
+         color = colBull, style = line.style_dashed, width = 2))
+    pushLine(line.new(bar_index, tTP2, rt, tTP2, xloc = xloc.bar_index,
+         color = color.new(colBull, 45), style = line.style_dotted, width = 2))
+    float risk = math.abs(tEntry - tSL)
+    float lots = lotsFor(risk)
+    float r1 = risk > 0 ? math.abs(tTP1 - tEntry) / risk : na
+    float r2 = risk > 0 ? math.abs(tTP2 - tEntry) / risk : na
+    mark((dir == 1 ? "BUY CONFIRMED " : "SELL CONFIRMED ") + str.tostring(stScore),
+         c, dir == -1,
+         (dir == 1 ? "BUY CONFIRMED" : "SELL CONFIRMED") + "   XAUUSD 5M\n" +
+         "Type: " + stType + "\n" +
+         "Entry: " + str.tostring(tEntry, format.mintick) + "\n" +
+         "SL: " + str.tostring(tSL, format.mintick) + "   (" +
+         str.tostring(risk / PIP, "#.#") + " pips, beyond the protected " +
+         (dir == 1 ? "low " : "high ") + str.tostring(protLevel, format.mintick) + ")\n" +
+         "TP1: " + str.tostring(tTP1, format.mintick) + "\n" +
+         "TP2: " + str.tostring(tTP2, format.mintick) + "\n" +
+         "R:R: 1:" + (na(r1) ? "n/a" : str.tostring(r1, "#.##")) + " / 1:" +
+         (na(r2) ? "n/a" : str.tostring(r2, "#.##")) + "\n" +
+         "Confluence: " + str.tostring(stScore) + "/100 — " + gradeOf(stScore) +
+         "   (confluence quality, NOT a win rate)\n" +
+         "Size: " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot · risk $" +
+         str.tostring(cashRisk(risk, lots), "#.##")) + "\n" +
+         "─────────────  THE FIVE STEPS  ─────────────\n" +
+         "1 TREND      1H " + biasTxt(bias1h) + " · 15M " + biasTxt(bias15) + "\n" +
+         "2 POI        " + poiKind + ", quality " + str.tostring(poiQual) + "/6\n" +
+         "3 MITIGATION " + mitigTxt + "\n" +
+         "4 SWEEP      " + sweptWhat + " swept, rejected, then MSS\n" +
+         "5 STOP/TP    beyond the protected level; targets on real opposing levels\n" +
+         "─────────────\n" +
+         "Wyckoff: " + wyTxt + "\n" +
+         "Estimated delta: " + deltaTxt + "\n" +
+         "Invalidation: a close beyond " + str.tostring(protLevel, format.mintick) +
+         " (the protected level) or beyond the stop.")
+
+if showTradeLn and (fireL or fireS)
+    drawEntry(fireL ? 1 : -1)
+
+if showSig and hitTp1
+    mark("TP — TAKE PROFIT", colStep, stDir == -1,
+         "TP — TAKE PROFIT WHEN THIS CANDLE CLOSES\n" +
+         "TP: " + str.tostring(tTP1, format.mintick) + "\n" +
+         "Position: " + (stDir == 1 ? "LONG" : "SHORT") + "\n" +
+         "Reason: the nearest meaningful opposing level has been reached.\n" +
+         "Action: TAKE PROFIT WHEN THIS CANDLE CLOSES." +
+         (beAfterTp1 ? "\nMOVE SL TO BREAKEVEN for the remainder — TP1 is banked." : ""))
+if showSig and hitTp2
+    mark("TP2 — TAKE PROFIT", colBull, stDir == -1,
+         "TP2 — TAKE PROFIT WHEN THIS CANDLE CLOSES\nTP: " +
+         str.tostring(tTP2, format.mintick) + "\nObjective reached. Trade closed.")
+if showSig and cancelNow
+    mark((stDir == 1 ? "CANCEL LONG" : "CANCEL SHORT"), colBear, stDir == -1,
+         (stDir == 1 ? "CANCEL LONG" : "CANCEL SHORT") + " — TRADE THESIS INVALID\n" +
+         "Entry: " + str.tostring(tEntry, format.mintick) + "\n" +
+         "Current: " + str.tostring(close, format.mintick) + "\n" +
+         "Invalidation: " + str.tostring(protLevel, format.mintick) + "\n" +
+         "Reason: " + cancelWhy + "\n" +
+         "Action: EXIT / CANCEL POSITION\n\n" +
+         "This is structural invalidation, not profit-taking: the level the whole setup rested on has gone.")
+if showSig and hitTime and not cancelNow and not hitTp2
+    mark("TIME STOP", colNeut, stDir == -1,
+         "TIME STOP — the setup stopped working. A scalp going nowhere is holding margin for nothing.")
+
+// Live-only TP notice. Never written into history, because an intrabar touch
+// is not a fact until the candle closes.
+var label devLbl = na
+if barstate.islast
+    label.delete(devLbl)
+    if showSig and tpDeveloping
+        devLbl := label.new(bar_index, high, "TP DEVELOPING — WAIT FOR CANDLE CLOSE",
+             xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_down,
+             color = color.new(colStep, 20), textcolor = color.black, size = size.tiny,
+             tooltip = "Price has reached the take-profit area INTRABAR. It is not confirmed until this candle closes there.")
+
+plot(showEmaLn ? ema20 : na, "EMA 20 — magenta", colE20, 2)
+plot(showEmaLn ? ema50 : na, "EMA 50 — sky blue", colE50, 2)
+plot(showEmaLn ? ema200 : na, "EMA 200 — grey", colE200, 3)
+plot(showLiq ? poolHi : na, "Likely buy-side liquidity", color.new(colLiqC, 40), 1,
+     plot.style_circles)
+plot(showLiq ? poolLo : na, "Likely sell-side liquidity", color.new(colLiqC, 40), 1,
+     plot.style_circles)
+bgcolor(conflicting ? color.new(colDead, 92) :
+     regime == "TRENDING BULLISH" ? color.new(colBull, 95) :
+     regime == "TRENDING BEARISH" ? color.new(colBear, 95) : na, title = "Regime tint")
+
+// ═════════════════════════════ DASHBOARD ════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 20, border_width = 1)
+row(int r, string k, string v, color bg) =>
+    table.cell(dash, 0, r, k, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left)
+    table.cell(dash, 1, r, v, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left, bgcolor = bg)
+
+drawDash() =>
+    color none = color.new(color.black, 65)
+    int sd = stDir != 0 ? stDir : (bias != 0 ? bias : 1)
+    int sc = sd == 1 ? scoreL : scoreS
+    float rk = sd == 1 ? riskLong : riskShort
+    float lots = lotsFor(rk)
+    table.cell(dash, 0, 0, isGold ? "XAUUSD 5M" : "⚠ " + syminfo.ticker,
+         text_color = color.white, text_size = size.small,
+         bgcolor = color.new(isGold ? color.black : colBear, 10))
+    table.cell(dash, 1, 0, statusTxt, text_color = color.white, text_size = size.small,
+         bgcolor = color.new(statusCol, 25))
+    // The framework's own progress is the headline row: which of the five
+    // steps the engine is on, and what it is waiting for.
+    row(1, "FRAMEWORK", stepTxt, color.new(st >= 1 ? colStep : colNeut, 55))
+    row(2, "STATE", stateName, color.new(st == 9 ? colBull : st == 8 ? colStep : colNeut, 60))
+    row(3, "WAITING ON", whyTxt, color.new(status == "BUY CONFIRMED" or
+         status == "SELL CONFIRMED" ? colBull : color.orange, 55))
+    row(4, "1 · TREND", step1Txt,
+         color.new(bias == 1 ? colBull : bias == -1 ? colBear : colNeut, 60))
+    row(5, "    regime", regime + "  ·  5M " + struct5, none)
+    row(6, "2 · POI", hasPoi ? poiKind + "  " + str.tostring(poiBot, format.mintick) +
+         "–" + str.tostring(poiTop, format.mintick) + "  quality " +
+         str.tostring(poiQual) + "/6" : "none selected",
+         color.new(hasPoi and poiQual >= minQuality ? colBull : colNeut, 60))
+    row(7, "    liquidity", liqTxt, none)
+    row(8, "3 · MITIGATION", mitigTxt + (poiTouch > 0 ? "  ·  " +
+         str.tostring(poiTouch) + " touch(es)" : ""),
+         color.new(mitigated ? colBull : poiFailed ? colBear : colNeut, 60))
+    row(9, "4 · SWEEP", st >= 6 ? sweptWhat + " swept" : "not yet",
+         color.new(st >= 6 ? colBull : colNeut, 60))
+    row(10, "    MSS", st >= 8 ? "shifted " + (stDir == 1 ? "up" : "down") :
+         st == 7 ? "waiting" : "—", color.new(st >= 8 ? colBull : colNeut, 60))
+    row(11, "    protected", protConfirmed and not na(protLevel) ?
+         str.tostring(protLevel, format.mintick) + "  ✓ confirmed" :
+         not na(sweepLevel) ? str.tostring(sweepLevel, format.mintick) +
+         "  · candidate only" : "—",
+         color.new(protConfirmed ? colLiqC : colNeut, 60))
+    row(12, "5 · STOP / TP", active ?
+         "SL " + str.tostring(tSL, format.mintick) + " · TP1 " +
+         str.tostring(tTP1, format.mintick) + " · TP2 " + str.tostring(tTP2, format.mintick) :
+         "SL " + str.tostring(sd == 1 ? slLong : slShort, format.mintick) + " · TP1 " +
+         str.tostring(sd == 1 ? tp1L : tp1S, format.mintick) + " · TP2 " +
+         str.tostring(sd == 1 ? tp2L : tp2S, format.mintick), none)
+    row(13, "    R:R", "1:" + str.tostring(sd == 1 ? rr1L : rr1S, "#.##") + " / 1:" +
+         str.tostring(sd == 1 ? rr2L : rr2S, "#.##") +
+         ((sd == 1 ? rrOkL : rrOkS) ? "" : "   ⚠ below " + str.tostring(minRR, "#.#")),
+         color.new((sd == 1 ? rrOkL : rrOkS) ? colBull : colNeut, 60))
+    row(14, "CONFLUENCE", str.tostring(sc) + "/100   ·   " + gradeOf(sc), none)
+    row(15, "HISTORY", histTxt, none)
+    row(16, "WYCKOFF", wyTxt, color.new(colWycC, 70))
+    // Labelled as inference, because that is what it is.
+    row(17, "EST. DELTA", deltaTxt + "   [inferred, not tape]", none)
+    row(18, "RSI / MACD", str.tostring(rsi, "#.#") + "  ·  " +
+         (macdLine > macdSigLine ? "MACD bull" : "MACD bear") + ", hist " +
+         (macdHist > macdHist[1] ? "rising" : "falling") + ", " +
+         (macdLine > 0 ? "above zero" : "below zero") + "  ·  ATR " + atrTxt, none)
+    row(19, "SESSION / RISK", sessName + "  ·  " +
+         (na(lots) ? "size n/a" : str.tostring(lots, "#.####") + " lot, $" +
+         str.tostring(cashRisk(rk, lots), "#.##")) +
+         (chasing ? "   ⚠ chasing" : ""),
+         chasing ? color.new(colBear, 40) : color.new(inKz ? colBull : colNeut, 60))
+
+if barstate.islast and showDash
+    drawDash()
+
+var table leg = table.new(position.bottom_left, 2, 8, border_width = 1)
+legRow(int r, string name, color sw) =>
+    table.cell(leg, 0, r, "", bgcolor = sw, width = 1)
+    table.cell(leg, 1, r, name, text_color = color.white, text_size = size.tiny,
+         text_halign = text.align_left)
+
+if barstate.islast and showLegend
+    table.cell(leg, 0, 0, "KEY", text_color = color.white, text_size = size.tiny,
+         bgcolor = color.new(color.black, 10))
+    table.cell(leg, 1, 0, "XAU 5-Step", text_color = color.white, text_size = size.tiny)
+    legRow(1, "Demand / support POI (Q = quality 1-6)", colDemand)
+    legRow(2, "Supply / resistance POI", colSupply)
+    legRow(3, "Likely liquidity ∘ · sweep ✕ · protected level", colLiqC)
+    legRow(4, "Step progress S1-S5 · MSS dashed", colStep)
+    legRow(5, "EMA 20 magenta · 50 blue · 200 grey", colE20)
+    legRow(6, "Wyckoff context", colWycC)
+    legRow(7, "Delta and order flow are INFERRED, not tape", color.new(colNeut, 30))
+
+// ══════════════════════════════ ALERTS ══════════════════════════════════════
+// One per transition. The ordered state machine is what makes that possible —
+// a setup cannot re-enter a state it has already passed through.
+
+alertcondition(fireL, "BUY confirmed", "XAUUSD 5M — BUY CONFIRMED.")
+alertcondition(fireS, "SELL confirmed", "XAUUSD 5M — SELL CONFIRMED.")
+alertcondition(confirmed and st == 8 and st[1] != 8, "Wait for confirmation",
+     "Setup ready — waiting for the confirmation candle to close.")
+alertcondition(confirmed and st == 6 and st[1] != 6, "Liquidity swept",
+     "Liquidity swept at a mitigated POI — not an entry yet.")
+alertcondition(confirmed and st == 4 and st[1] != 4, "POI mitigated",
+     "POI mitigated — waiting for a liquidity sweep.")
+alertcondition(hitTp1, "TP1 — take profit", "TP reached — take profit on this candle's close.")
+alertcondition(hitTp2, "TP2 — take profit", "TP2 reached — trade closed.")
+alertcondition(tpDeveloping, "TP developing", "TP area reached intrabar — wait for the close.")
+alertcondition(cancelNow, "Cancel trade", "Trade thesis invalid — exit the position.")
+alertcondition(beSuggest, "Move SL to break-even", "TP1 banked — move the stop to break-even.")
+alertcondition(confirmed and resetNow, "Setup cancelled", "Developing setup cancelled.")
+
+if fireL or fireS
+    int dir = fireL ? 1 : -1
+    float risk = math.abs(tEntry - tSL)
+    float lots = lotsFor(risk)
+    float r1 = risk > 0 ? math.abs(tTP1 - tEntry) / risk : na
+    float r2 = risk > 0 ? math.abs(tTP2 - tEntry) / risk : na
+    alert((dir == 1 ? "BUY CONFIRMED" : "SELL CONFIRMED") + "\nXAUUSD 5M · " + stType + "\n" +
+         "Entry: " + str.tostring(tEntry, format.mintick) + "\n" +
+         "SL: " + str.tostring(tSL, format.mintick) + "  (beyond the protected " +
+         (dir == 1 ? "low " : "high ") + str.tostring(protLevel, format.mintick) + ")\n" +
+         "TP1: " + str.tostring(tTP1, format.mintick) + "\n" +
+         "TP2: " + str.tostring(tTP2, format.mintick) + "\n" +
+         "R:R: 1:" + (na(r1) ? "n/a" : str.tostring(r1, "#.##")) + " / 1:" +
+         (na(r2) ? "n/a" : str.tostring(r2, "#.##")) + "\n" +
+         "Confluence: " + str.tostring(stScore) + "/100 (confluence quality, not a win rate)\n" +
+         "Size: " + (na(lots) ? "n/a" : str.tostring(lots, "#.####") + " lot") + "\n" +
+         "STEP 1 trend: 1H " + biasTxt(bias1h) + " · 15M " + biasTxt(bias15) + "\n" +
+         "STEP 2 POI: " + poiKind + " quality " + str.tostring(poiQual) + "/6\n" +
+         "STEP 3 mitigation: " + mitigTxt + "\n" +
+         "STEP 4 sweep: " + sweptWhat + ", rejected, then MSS\n" +
+         "STEP 5 stop: beyond the protected level; targets on real opposing levels\n" +
+         "Wyckoff: " + wyTxt + "\n" +
+         "Estimated delta: " + deltaTxt + "\n" +
+         "Invalidation: close beyond " + str.tostring(protLevel, format.mintick) + "\n" +
+         "Action: " + (dir == 1 ? "BUY" : "SELL") + " — the confirmation candle has CLOSED",
+         alert.freq_once_per_bar_close)
+
+if confirmed and st == 8 and st[1] != 8
+    alert("WAIT FOR CONFIRMATION\nXAUUSD 5M\n" +
+         "Potential: " + (stDir == 1 ? "BUY" : "SELL") + "  (" + setupType + ")\n" +
+         "Current price: " + str.tostring(close, format.mintick) + "\n" +
+         "Confluence: " + str.tostring(stDir == 1 ? scoreL : scoreS) + "/100\n" +
+         "Confirmed so far: POI " + poiKind + " Q" + str.tostring(poiQual) +
+         " · mitigated (" + mitigTxt + ") · " + sweptWhat +
+         " swept and rejected · MSS " + (stDir == 1 ? "up" : "down") + "\n" +
+         "Still needed: " + (stDir == 1 ? "a bullish candle to CLOSE" :
+         "a bearish candle to CLOSE") + "\n" +
+         "Protected level: " + str.tostring(protLevel, format.mintick) + "\n" +
+         "Invalidation: a close beyond the protected level, or " +
+         str.tostring(confirmWin) + " bars with no confirmation close.\n" +
+         "DO NOT ENTER YET.", alert.freq_once_per_bar_close)
+
+if hitTp1
+    alert("TP — TAKE PROFIT WHEN THIS CANDLE CLOSES\n" +
+         "TP: " + str.tostring(tTP1, format.mintick) + "\n" +
+         "Position: " + (stDir == 1 ? "LONG" : "SHORT") + "\n" +
+         "Reason: nearest meaningful opposing liquidity reached\n" +
+         "Action: TAKE PROFIT WHEN THIS CANDLE CLOSES" +
+         (beAfterTp1 ? "\nMOVE SL TO BREAKEVEN for the remainder." : ""),
+         alert.freq_once_per_bar_close)
+
+if cancelNow
+    alert((stDir == 1 ? "CANCEL LONG" : "CANCEL SHORT") + " — TRADE THESIS INVALID\n" +
+         "Entry: " + str.tostring(tEntry, format.mintick) + "\n" +
+         "Current price: " + str.tostring(close, format.mintick) + "\n" +
+         "Invalidation: " + str.tostring(protLevel, format.mintick) + "\n" +
+         "Reason: " + cancelWhy + "\n" +
+         "Action: EXIT / CANCEL POSITION", alert.freq_once_per_bar_close)

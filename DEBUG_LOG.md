@@ -503,3 +503,75 @@ costs an extra sequence step.
 
 A dead-code sweep is not a style check. On this file it was the most productive
 review step of the build.
+
+---
+
+## 16. Building `xau_5step.pine` — and a checker bug that had been hiding
+
+### `poiDir` was used four times and declared nowhere
+
+The POI mitigation logic read `poiDir` in `penetrated`, `rejected`, `deeper`
+and the depth tracker. It was never declared. The audit did not see it, because
+check 5 only catches a name declared **later** than it is used — a name
+declared *nowhere* had no entry in `decl_line` at all, so the lookup returned
+`None` and nothing was reported.
+
+**Check 12** now flags identifiers that are used but never declared anywhere.
+Getting it usable took three passes of false positives, each one instructive:
+
+1. **Named arguments on continuation lines.** `max_lines_count = 300` on line 2
+   of a call is a parameter name, not a reference. Stripping only worked when
+   the opening paren was on the same line, so it needed the same `call_depth`
+   tracking check 5 already had.
+2. **UDT fields.** `float top` inside `type Poi` is a field declaration, not a
+   use of a variable named `top`. The scanner now tracks type blocks and
+   registers their fields.
+3. **Function parameters.** `trackHL(bool inSess, ...)` declares `inSess` on the
+   signature line, which nothing was collecting.
+
+### The bug that had been there all along
+
+Clearing those left two hits in `scalper_pro.pine` — `intraIsHigher` and
+`intraBias` — both plainly declared. The declaration regex was:
+
+```python
+r"^(?:var\s+)?(?:int|float|bool|string|color|line|label|box|table|array<[^>]+>)?\s*(\w+)\s*=(?!=|>)"
+```
+
+The type alternation has no trailing whitespace requirement, so on
+`intraIsHigher = ...` it matched the literal **`int`** at the start of the
+name, then captured `raIsHigher` as the declaration. The real name looked
+undeclared.
+
+That means **every check built on `decl_line` has been quietly wrong for any
+variable whose name begins with a type keyword** — `int*`, `float*`, `bool*`,
+`string*`, `color*`, `line*`, `label*`, `box*`, `table*`. Forward-reference
+detection included. The fix is one character class:
+
+```python
+r"^(?:var(?:ip)?\s+)?(?:(?:int|float|...|map<[^>]+>)\s+)?(\w+)\s*=(?!=|>)"
+```
+
+The corrected form was already in checks 9 and 12; check 5 never got it.
+
+### Seven computed-then-unused values
+
+Same sweep as last build, same lesson. `sweepLife` (a redundant twin of
+`mssWin` — now they are two distinct waits), `atrAvg`, `tol`, `macdLine`,
+`macdSigLine`, `rMid`, `transp`. Five wired in, two removed.
+
+Wiring `atrTxt` in then produced a genuine forward reference — it used `dead`,
+declared seventeen lines below — which check 5 caught immediately. That is the
+audit working as intended: a fix introducing a new bug, found before it shipped.
+
+### Twelve checks, seven scripts
+
+| Script | Lines | Est. tokens | Top-level | Longest if |
+|---|---|---|---|---|
+| `candlestick_master_oscillators.pine` | 143 | 7,241 | 61 | 1 |
+| `xau_5step.pine` | 1,441 | 61,755 | 468 | 25 |
+| `scalper_pro_strategy.pine` | 407 | 17,047 | 189 | 7 |
+| `scalper_pro.pine` | 1,836 | 73,136 | 603 | 27 |
+| `xau_scalper.pine` | 1,847 | 74,571 | 627 | 28 |
+| `xau_5m_scalper.pine` | 1,963 | 85,195 | 692 | 26 |
+| `candlestick_master_pro.pine` | 2,391 | 89,520 | 647 | 62 |

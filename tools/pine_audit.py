@@ -79,7 +79,12 @@ for i, l in enumerate(code):
     if m:
         func_line.setdefault(m.group(1), i)
         continue
-    m = re.match(r"^(?:var\s+)?(?:int|float|bool|string|color|line|label|box|table|array<[^>]+>)?\s*(\w+)\s*=(?!=|>)", l)
+    # The type keyword must be followed by WHITESPACE. Without that, the
+    # alternation matches the literal "int" at the start of intraIsHigher and
+    # registers the declaration as "raIsHigher" — so the real name looks
+    # undeclared and every check built on decl_line is quietly wrong for any
+    # variable whose name begins with a type keyword.
+    m = re.match(r"^(?:var(?:ip)?\s+)?(?:(?:int|float|bool|string|color|line|label|box|table|array<[^>]+>|map<[^>]+>)\s+)?(\w+)\s*=(?!=|>)", l)
     if m:
         decl_line.setdefault(m.group(1), i)
     m = re.match(r"^\[([^\]]+)\]\s*=", l)
@@ -310,6 +315,82 @@ top_level = sum(1 for l in code
 if top_level > 900:
     problems.append(("CE10295", f"{top_level} top-level statements — move work "
                                 f"into functions"))
+
+# ---------- 12. identifiers used but never declared ----------
+# CE10272 again, but the other half of it. Check 5 only catches a name declared
+# LATER than it is used; a name declared nowhere at all was invisible to it,
+# which is how a state variable can be read on four lines and never exist.
+BUILTIN = set("""close open high low volume time time_close time_tradingday
+hl2 hlc3 hlcc4 ohlc4 bar_index last_bar_index last_bar_time na nz
+dayofmonth dayofweek hour minute month second weekofyear year timenow
+syminfo timeframe barstate session strategy chart dividends earnings
+splits currency adjustment barmerge display extend format
+label_style line_style location order position scale shape size
+text xloc yloc font math str array map matrix color line label box table
+polyline linefill ta request input indicator library alert alertcondition
+bgcolor barcolor fill plot plotarrow plotbar plotcandle plotchar plotshape
+max_bars_back runtime log timestamp true false""".split())
+
+known = set(decl_line) | set(func_line) | KEYWORDS | BUILTIN
+# Function parameters are declared on the signature line, not by assignment.
+for l in code:
+    m = re.match(r"^(\w+)\s*\(([^)]*)\)\s*=>", l)
+    if m:
+        for prm in m.group(2).split(","):
+            prm = prm.strip()
+            if prm:
+                known.add(prm.split("=")[0].strip().split()[-1])
+in_type = False
+for i, l in enumerate(code):
+    # user-defined type: register the name and every field
+    if re.match(r"^type\s+\w+", l):
+        known.add(re.match(r"^type\s+(\w+)", l).group(1))
+        in_type = True
+        continue
+    if in_type:
+        m = re.match(r"^\s+\w+(?:<[^>]+>)?\s+(\w+)", l)
+        if l.strip() and m:
+            known.add(m.group(1))
+            continue
+        if l.strip():
+            in_type = False
+    m = re.match(r"^\s+(?:var(?:ip)?\s+)?(?:(?:int|float|bool|string|color|line|label|box|table|array<[^>]+>|map<[^>]+>|[A-Z]\w*)\s+)?(\w+)\s*=(?!=)", l)
+    if m:
+        known.add(m.group(1))
+    m = re.match(r"^\s*for\s+(\w+)\s*=", l)
+    if m:
+        known.add(m.group(1))
+    m = re.match(r"^\s*\[([^\]]+)\]\s*=", l)
+    if m:
+        known.update(n.strip().split()[-1] for n in m.group(1).split(","))
+
+undeclared = {}
+depth12 = 0
+in_type = False
+for i, l in enumerate(code):
+    t = l.strip()
+    if re.match(r"^type\s+\w+", l):
+        in_type = True
+        continue
+    if in_type:
+        if t and not re.match(r"^\s+\w", l):
+            in_type = False
+        else:
+            continue
+    if t and not t.startswith("//"):
+        scan = re.sub(r"\.\w+", " ", l)
+        # Named arguments are parameter names, not references. They must be
+        # stripped whenever the line is INSIDE an open call, not only when the
+        # opening paren happens to sit on the same line.
+        if "(" in scan or depth12 > 0:
+            scan = re.sub(r"\b\w+\s*=(?!=)", " ", scan)
+        for name in re.findall(r"\b[a-z][a-zA-Z0-9_]*\b", scan):
+            if name not in known:
+                undeclared.setdefault(name, i + 1)
+    depth12 = max(0, depth12 + l.count("(") + l.count("[")
+                     - l.count(")") - l.count("]"))
+for name, ln in sorted(undeclared.items(), key=lambda kv: kv[1]):
+    problems.append(("UNDECLARED", f"line {ln}: '{name}' is used but never declared"))
 
 # ---------- 7. token estimate ----------
 raw = sum(len(re.findall(r"[A-Za-z_]\w*|\d+\.?\d*|[^\s\w]", l)) for l in code)
