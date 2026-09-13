@@ -434,6 +434,10 @@ addLevel(float lvl, int side) =>
                 if math.abs(array.get(srPrice, i) - lvl) <= tol * 2
                     idx := i
                     break
+        // Both branches must end in a VOID call. array.set and array.push are
+        // void; array.shift RETURNS the element it removed, so a branch ending
+        // in one takes that value's type while its sibling stays void — which
+        // is exactly CE10235. The trimming therefore lives outside the if/else.
         if idx >= 0
             array.set(srHits, idx, array.get(srHits, idx) + 1)
             array.set(srPrice, idx, (array.get(srPrice, idx) + lvl) / 2.0)
@@ -441,15 +445,19 @@ addLevel(float lvl, int side) =>
             array.push(srPrice, lvl)
             array.push(srHits, 1)
             array.push(srSide, side)
-            if array.size(srPrice) > 24
-                array.shift(srPrice)
-                array.shift(srHits)
-                array.shift(srSide)
 
 if not na(phE)
     addLevel(phE, -1)
 if not na(plE)
     addLevel(plE, 1)
+
+// Cap the level list at top level, where there is no sibling branch for the
+// return type to clash with. The shifted values are captured rather than left
+// dangling so the intent is explicit: they are discarded, not ignored.
+if array.size(srPrice) > 24
+    float droppedPrice = array.shift(srPrice)
+    int droppedHits = array.shift(srHits)
+    int droppedSide = array.shift(srSide)
 
 // Nearest qualifying level on each side. Ties broken by proximity, because the
 // nearest wall is the one that stops this trade.

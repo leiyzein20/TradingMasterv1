@@ -371,3 +371,75 @@ All five scripts now pass all nine checks:
 | `scalper_pro.pine` | 1,836 | 73,136 |
 | `xau_scalper.pine` | 1,839 | 74,524 |
 | `candlestick_master_pro.pine` | 2,391 | 89,520 |
+
+---
+
+## 14. CE10235 in `addLevel()` — branches ending in different types
+
+```
+Return type of one of the 'if' or 'switch' blocks is not compatible
+with return type of other block(s)
+```
+
+A Pine block's type is the type of its **last statement**. In the ranked S/R
+level builder the two branches did not agree:
+
+```pine
+if idx >= 0
+    array.set(srHits, idx, array.get(srHits, idx) + 1)
+    array.set(srPrice, idx, ...)          // array.set → VOID
+else
+    array.push(srPrice, lvl)
+    array.push(srHits, 1)
+    array.push(srSide, side)
+    if array.size(srPrice) > 24
+        array.shift(srPrice)
+        array.shift(srHits)
+        array.shift(srSide)               // array.shift RETURNS the element
+```
+
+`array.shift()` returns the element it removed, so the `else` branch is typed
+`int` while the `if` branch is `void`.
+
+It is invisible while reading because both lines look like the same kind of
+list housekeeping — and this is the **second** time this exact class has bitten
+this repository. The first was `array.remove()` ending an `if` branch in
+`candlestick_master_pro.pine` (§4 above).
+
+Fixed by moving the trimming out of the if/else to top level, where there is no
+sibling branch for the type to clash with, and capturing the returns so the
+discard is explicit:
+
+```pine
+if array.size(srPrice) > 24
+    float droppedPrice = array.shift(srPrice)
+    int droppedHits = array.shift(srHits)
+    int droppedSide = array.shift(srSide)
+```
+
+### Check 10: branch return-type mismatch
+
+Twice is a pattern, so it is now mechanical. The audit classifies the last
+statement of each `if` and `else` branch as **void** (`array.push/set/clear`,
+`*.delete`, `*.set_*`, any `:=` assignment) or **value** (`array.shift/pop/
+remove/get/size/...`) and flags any pair that disagrees. Verified against a
+minimal reproduction of this bug:
+
+```
+[CE10235] line 5: if/else branches end in different types — line 6 is void, line 10 is value
+```
+
+### Ten checks, five scripts
+
+| Script | Est. tokens | Result |
+|---|---|---|
+| `candlestick_master_oscillators.pine` | 7,241 | clean |
+| `scalper_pro_strategy.pine` | 17,047 | clean |
+| `scalper_pro.pine` | 73,136 | clean |
+| `xau_scalper.pine` | 74,571 | clean |
+| `candlestick_master_pro.pine` | 89,520 | clean |
+
+Checks: declaration count · delimiter balance · continuation indent ·
+`ta.*` in ternary branches · forward references (including inside function
+bodies) · function/variable collisions · built-in names exist · top-level
+redeclaration · if/else branch return types · token budget.

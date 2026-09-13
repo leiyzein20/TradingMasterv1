@@ -207,6 +207,69 @@ for i, l in enumerate(code):
         else:
             seen[n] = i
 
+# ---------- 10. if / else branches with clashing return types ----------
+# CE10235. A block's type is the type of its LAST statement. array.shift,
+# array.pop and array.remove RETURN the element they removed, so a branch
+# ending in one is typed float/int while a sibling ending in array.push or
+# array.set is void — and Pine refuses to reconcile them. This is invisible
+# while reading because both lines look like the same kind of housekeeping.
+VALUE_FN = re.compile(r"^(?:array|matrix|map)\.(shift|pop|remove|get|size|"
+                      r"indexof|lastindexof|includes|join|slice|copy|sum|avg|"
+                      r"min|max|median|mode|stdev|variance|range|first|last)\s*\(")
+VOID_FN = re.compile(r"^(?:(?:array|matrix|map)\.(?:push|set|unshift|insert|clear|"
+                     r"fill|sort|reverse|concat)|(?:label|line|box|table|linefill|"
+                     r"polyline)\.(?:delete|set_\w+|cell\w*)|\w+\s*:=)\s*\(?")
+
+def kind(stmt):
+    t = stmt.strip()
+    if not t or t.startswith("//"):
+        return None
+    if VALUE_FN.match(t):
+        return "value"
+    if VOID_FN.match(t) or re.match(r"^\w+\s*:=", t):
+        return "void"
+    return None
+
+def indent_of(k):
+    return len(lines[k]) - len(lines[k].lstrip())
+
+def last_stmt_kind(start, end, base):
+    """Kind of the deepest last executable statement of a branch body."""
+    last = None
+    for k in range(start, end):
+        if not code[k].strip() or lines[k].lstrip().startswith("//"):
+            continue
+        if indent_of(k) <= base:
+            break
+        last = k
+    return (kind(code[last]), last + 1) if last is not None else (None, None)
+
+for i, l in enumerate(code):
+    m = re.match(r"^(\s*)if\s+\S", l)
+    if not m:
+        continue
+    base = len(m.group(1))
+    # find the matching else at the same indent
+    j = i + 1
+    else_at = None
+    while j < len(code):
+        if code[j].strip() and indent_of(j) <= base:
+            if re.match(r"^\s*else\b", code[j]) and indent_of(j) == base:
+                else_at = j
+            break
+        j += 1
+    if else_at is None:
+        continue
+    k1, ln1 = last_stmt_kind(i + 1, else_at, base)
+    end = else_at + 1
+    while end < len(code) and (not code[end].strip() or indent_of(end) > base):
+        end += 1
+    k2, ln2 = last_stmt_kind(else_at + 1, end, base)
+    if k1 and k2 and k1 != k2:
+        problems.append(("CE10235", f"line {i+1}: if/else branches end in "
+                                    f"different types — line {ln1} is {k1}, "
+                                    f"line {ln2} is {k2}"))
+
 # ---------- 7. token estimate ----------
 raw = sum(len(re.findall(r"[A-Za-z_]\w*|\d+\.?\d*|[^\s\w]", l)) for l in code)
 est = int(raw * 5.18)
