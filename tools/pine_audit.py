@@ -120,6 +120,9 @@ for i, l in enumerate(code):
     ref_line = body_owner[1] if body_owner else i
     locals_ = body_owner[2] if body_owner else set()
     rhs = l.split("=", 1)[1] if re.match(r"^\s*[\w\[\]., ]+=(?!=)", l) else l
+    # Member access is not a variable reference: math.sum must not be read as a
+    # use of a global named `sum`.
+    rhs = re.sub(r"\.\w+", " ", rhs)
     # Named arguments (extend = ..., text_size = ...) are parameter names, not
     # references to anything, so they must not be read as forward references.
     if "(" in rhs or call_depth > 0:
@@ -391,6 +394,18 @@ for i, l in enumerate(code):
                      - l.count(")") - l.count("]"))
 for name, ln in sorted(undeclared.items(), key=lambda kv: kv[1]):
     problems.append(("UNDECLARED", f"line {ln}: '{name}' is used but never declared"))
+
+# ---------- 13. multi-line function signatures ----------
+# Pine does not continue a function signature across lines: the name, the
+# parameter list and the => must all sit on one line. Wrapping a long signature
+# the way you would wrap a call is silently invalid.
+for i, l in enumerate(code):
+    if "=>" not in l:
+        continue
+    if re.match(r"^\w+\s*\([^)]*\)\s*=>\s*$", l.strip()) or re.match(r"^\w+\s*\([^)]*\)\s*=>", l):
+        continue
+    problems.append(("SIGNATURE", f"line {i+1}: '=>' is not on a complete "
+                                  f"one-line function signature"))
 
 # ---------- 7. token estimate ----------
 raw = sum(len(re.findall(r"[A-Za-z_]\w*|\d+\.?\d*|[^\s\w]", l)) for l in code)

@@ -575,3 +575,85 @@ audit working as intended: a fix introducing a new bug, found before it shipped.
 | `xau_scalper.pine` | 1,847 | 74,571 | 627 | 28 |
 | `xau_5m_scalper.pine` | 1,963 | 85,195 | 692 | 26 |
 | `candlestick_master_pro.pine` | 2,391 | 89,520 | 647 | 62 |
+
+---
+
+## 17. Building `divine_xau_scalper.pine` — three new error classes
+
+Six timeframe engines, written as one function run six times so each call site
+gets its own persistent state. Checked before delivery; four findings, two of
+which produced permanent new checks.
+
+### A multi-line function signature
+
+```pine
+tfRow(int r, string name, bool okTf, int ctx, int sb, int lb, int fb, int mb,
+     int pq, int mi, int wyp, int scv) =>
+```
+
+Pine does **not** continue a function signature across lines — the name, the
+parameter list and the `=>` must all be on one line. Wrapping a long signature
+the way you would wrap a call is silently invalid. It surfaced indirectly: the
+audit reported the parameters as undeclared, because its function regex
+requires a one-line signature and therefore never registered them.
+
+**Check 13** now flags any `=>` that is not on a complete one-line signature.
+Verified against a minimal reproduction.
+
+### `math.floor` returning float into an int accumulator
+
+```pine
+int scL = 0
+scL += math.floor(poiQ * 0.15)     // int += float
+```
+
+`math.floor` always returns float, and Pine will not `+=` that into an `int`.
+Two occurrences, both cast.
+
+### A function call cannot be indexed
+
+```pine
+[..., math.min(100, scL)[1], ...]     // invalid
+```
+
+`[1]` needs a series variable, not an expression. Assigned to `scFinal` first.
+
+### Check 5 was reading `math.sum` as a use of a global named `sum`
+
+Naming a table `sum` produced a forward-reference report against `math.sum`
+inside the engine. Check 12 already stripped member access before scanning;
+check 5 never did. Fixed there too — and the table renamed, because a variable
+called `sum` sitting beside `math.sum` is worth not having regardless.
+
+### A name that shadowed across scopes
+
+`zW` existed as a local inside `tfEngine()` and was then declared again as a
+chart-level global. Pine would shadow it inside the function, so it is not an
+error — but a value meaning two different things depending on where you read
+it is a bug waiting to happen. The global was renamed `zoneWC`.
+
+### Twenty-seven computed-then-unused values
+
+The largest sweep yet, and it found a genuine missing feature: `useFib` and
+`cFibc` were declared because the brief asks for a Fibonacci engine, and no
+Fibonacci engine had been written. It is now in `tfEngine()`, anchored to the
+confirmed external leg, feeding POI quality and nothing else.
+
+The rest: four module toggles that gated nothing, per-timeframe POI bounds and
+ATR that were returned and never displayed (now in the dashboard cells and row
+tooltips), `regTxt` (per-timeframe regime, now shown), `zoneWC` (now the
+protected-level noise buffer, so a one-tick poke no longer cancels a trade),
+`volExpC`, and the second R:R.
+
+### Thirteen checks, eight scripts
+
+| Script | Lines | Est. tokens | Top-level | Longest if |
+|---|---|---|---|---|
+| `candlestick_master_oscillators.pine` | 143 | 7,241 | 61 | 1 |
+| `scalper_pro_strategy.pine` | 407 | 17,047 | 189 | 7 |
+| `xau_5step.pine` | 1,441 | 61,755 | 468 | 25 |
+| `scalper_pro.pine` | 1,836 | 73,136 | 603 | 27 |
+| `xau_scalper.pine` | 1,847 | 74,571 | 627 | 28 |
+| `divine_xau_scalper.pine` | 1,626 | 78,311 | 432 | 60 |
+| `xau_5m_scalper.pine` | 1,963 | 85,195 | 692 | 26 |
+| `candlestick_master_pro.pine` | 2,391 | 89,520 | 647 | 62 |
