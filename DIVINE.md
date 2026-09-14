@@ -156,9 +156,14 @@ labelled `EST. DELTA [inferred]` and the order-flow readout `[PROXY]`.
 
 **Estimated delta** on the chart timeframe signs each 1-minute intrabar's
 volume by that intrabar's own close, via `request.security_lower_tf`. The six
-nested engines cannot use that — `request.security_lower_tf` cannot be nested
-inside `request.security` — so they use the close-position proxy instead. The
-dashboard says which method produced the number.
+nested engines use the close-position proxy instead.
+
+*Correction:* an earlier version of this note said `request.security_lower_tf`
+**cannot** be nested inside `request.security`. That was wrong — Pine v6 permits
+nested requests, and a nested call inherits the outer call's context. The real
+reasons the engines use the proxy are cost (six nested intrabar requests on top
+of six engines) and the 127-element cap that all `request.*()` tuples share.
+The dashboard says which method produced the number.
 
 Pine cannot see the global XAUUSD order book, hidden liquidity, OTC flow or
 true bid/ask volume. Nothing here pretends otherwise.

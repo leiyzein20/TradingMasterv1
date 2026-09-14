@@ -149,7 +149,7 @@ substantial risk of loss — do your own research and manage your own risk.
 
 ---
 
-## Eight scripts in this repo
+## Nine scripts in this repo
 
 > **Each one needs its own Pine Editor tab.** Pine allows exactly one
 > `indicator()` / `strategy()` / `library()` per script. Pasting two of these
@@ -158,6 +158,7 @@ substantial risk of loss — do your own research and manage your own risk.
 
 | Script | For | Timeframes |
 |---|---|---|
+| **`xau_apex.pine`** | XAUUSD. **Account & risk module** (balance, risk as % / $ / fixed lot, target as R:R or $), a 15/30-minute scenario engine, a plain-English trade plan panel and a validation-statistics panel | 1M–5M chart, 1H–3M context |
 | **`divine_xau_scalper.pine`** | XAUUSD. **Six independent timeframe engines** (1H/30M/15M/5M/3M/1M), one analysis function run six times with separate state each, plus an MTF confluence layer. 6-row master dashboard | 1M–5M chart, six engines above |
 | **`xau_5step.pine`** | XAUUSD 5M. The five-step framework as an **ordered pipeline**: trend → POI → mitigation → sweep + MSS → protected-level stop. A state can only be entered from the one before it, so no score can skip a step | 5M chart, 1H + 15M context |
 | **`xau_5m_scalper.pine`** | XAUUSD 5M. Ten-step reversal and continuation sequences, Wyckoff events + phases + three laws, estimated delta from lower-timeframe volume, session volume profile, full trade-management state machine (TP / cancel / break-even). Built from `anotherone.txt` | 5M chart, 15M/1H/4H/1D context |
@@ -167,7 +168,7 @@ substantial risk of loss — do your own research and manage your own risk.
 | `candlestick_master_oscillators.pine` | RSI / MACD / Stochastic as visible curves in their own pane | any |
 | `candlestick_master_pro.pine` | 45 candlestick patterns + confluence. A different tool for higher timeframes | H1–D1 |
 
-The five scalping engines are **separate systems that disagree with each
+The six scalping engines are **separate systems that disagree with each
 other on purpose**, each built from a different brief. `xau_5m_scalper.pine`
 gates a ten-step sequence through a state machine; `xau_scalper.pine` walks a
 confirmation chain where any structural layer can end a thesis;
@@ -175,7 +176,7 @@ confirmation chain where any structural layer can end a thesis;
 `xau_5step.pine` runs an ordered pipeline where each state is enterable only
 from the one before it. `divine_xau_scalper.pine` runs six independent
 timeframe engines and compares them. No trading logic is shared between any of them. Docs:
-[`DIVINE.md`](DIVINE.md), [`FIVESTEP.md`](FIVESTEP.md), [`XAU5M.md`](XAU5M.md),
+[`APEX.md`](APEX.md), [`DIVINE.md`](DIVINE.md), [`FIVESTEP.md`](FIVESTEP.md), [`XAU5M.md`](XAU5M.md),
 [`ARCHITECTURE.md`](ARCHITECTURE.md) + [`MANUAL.md`](MANUAL.md), and
 [`STRATEGY.md`](STRATEGY.md) respectively.
 

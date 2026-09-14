@@ -657,3 +657,81 @@ protected-level noise buffer, so a one-tick poke no longer cancels a trade),
 | `divine_xau_scalper.pine` | 1,626 | 78,311 | 432 | 60 |
 | `xau_5m_scalper.pine` | 1,963 | 85,195 | 692 | 26 |
 | `candlestick_master_pro.pine` | 2,391 | 89,520 | 647 | 62 |
+
+---
+
+## 18. Building `xau_apex.pine` — and losing the working tree
+
+### The container was reclaimed mid-build
+
+Partway through this build the working directory was wiped: `.git` had been
+re-initialised with no commits, on `master`, and every file was gone except the
+one I had just written. Nothing was lost, because everything through commit
+`344f5e8` was already pushed. Recovery was:
+
+```
+git fetch origin claude/pine-script-indicator-debug-rmdndx
+git checkout -B claude/pine-script-indicator-debug-rmdndx origin/...
+```
+
+with the in-progress file parked in the scratchpad first. Worth recording as the
+argument for pushing after every engine rather than at the end of a session.
+
+### Research that was actually worth doing
+
+The user asked for online research. Searching for a high-win-rate gold strategy
+returns marketing, not edge, and that is worth saying plainly. Searching the
+Pine documentation returned three facts that matter:
+
+- **All `request.*()` calls in a script share a 127-element tuple cap.**
+  Nothing here was near it — `divine_xau_scalper.pine` uses 89, this one 35 —
+  but it is a real ceiling on the "one engine, many timeframes" pattern and
+  nothing was tracking it.
+- **`lookahead_on` with `[1]` is the canonical non-repainting idiom.** Briefs 3
+  to 5 asked for `lookahead_off`, which is also safe *with* the `[1]`; this one
+  uses the canonical form.
+- **Nested `request.*()` calls are permitted in v6** and inherit the outer
+  call's context. That contradicted a claim in `DIVINE.md` that
+  `request.security_lower_tf` *cannot* be nested inside `request.security`.
+  Corrected there: the real reasons that engine uses the cheaper delta proxy
+  are cost and the tuple cap, not impossibility.
+
+### One name shadowing across scopes, again
+
+`hh` / `hl` / `lh` / `ll` existed as locals inside `htfPack()` and again as
+chart-level globals. Pine shadows them inside the function so it is not an
+error, but a name meaning two different things depending on where you read it
+is a bug waiting to happen. Renamed `htfHH` / `htfHL` / `htfLH` / `htfLL`. This
+is the third build in a row where the forward-reference check surfaced a
+shadowed name; it is worth treating the report as a design smell rather than a
+false positive.
+
+### Twenty-two computed-then-unused values
+
+Including two that were real gaps rather than tidiness:
+
+- **`sh1`–`sl5`** — confirmed HTF swing highs and lows were being requested from
+  all five timeframes and then ignored, while the target ladder used rolling
+  12-bar extremes instead. Confirmed pivots are *places price actually turned*;
+  they are now in both the ladder and the location test.
+- **`regRanging`** — computed and never read, so fading a trend and fading a
+  range edge required identical evidence. Fading a trend now costs an extra
+  piece (a Wyckoff event or a reclaim), which is the difference between the two
+  trades.
+
+The rest: `useRsi` / `useBb` gating nothing, `simpleDir`, `reclaimUp` /
+`lossDn`, `resHits` / `supHits`, `candleWord`, `rr2L` / `rr2S`, `gradeOf`.
+
+### Thirteen checks, nine scripts
+
+| Script | Lines | Est. tokens | Top-level | Longest if |
+|---|---|---|---|---|
+| `candlestick_master_oscillators.pine` | 143 | 7,241 | 61 | 1 |
+| `scalper_pro_strategy.pine` | 407 | 17,047 | 189 | 7 |
+| `xau_5step.pine` | 1,441 | 61,755 | 468 | 25 |
+| `scalper_pro.pine` | 1,836 | 73,136 | 603 | 27 |
+| `xau_scalper.pine` | 1,847 | 74,571 | 627 | 28 |
+| `divine_xau_scalper.pine` | 1,626 | 78,311 | 432 | 60 |
+| `xau_5m_scalper.pine` | 1,963 | 85,195 | 692 | 26 |
+| `xau_apex.pine` | 1,822 | 87,386 | 651 | 51 |
+| `candlestick_master_pro.pine` | 2,391 | 89,520 | 647 | 62 |
